@@ -23,11 +23,13 @@ export interface MiaoshouSelectorConfig {
     failureText: string[];
     loadingText: string[];
   };
+  /** 点击后可能弹出的采集面板容器选择器 */
+  panelSelectors: string[];
 }
 
 /** 默认选择器配置（⚠️ PoC 待验证，禁止当作已验证结论） */
 export const DEFAULT_MIAOSHOU_SELECTORS: MiaoshouSelectorConfig = {
-  version: 'miaoshou-selectors/0.1.0-poc-unverified',
+  version: 'miaoshou-selectors/0.2.0-poc-unverified',
   attributeSelectors: [
     '[data-miaoshou-collect]',
     '[data-ms-collect]',
@@ -40,11 +42,17 @@ export const DEFAULT_MIAOSHOU_SELECTORS: MiaoshouSelectorConfig = {
     failureText: ['采集失败', '已采集过', '重复采集'],
     loadingText: ['采集中', '正在采集'],
   },
+  panelSelectors: [
+    '[class*="collect-panel"][class*="body"]',
+    '[class*="collect-drawer"]',
+    '[class*="collect-modal"]',
+    '[class*="collect-dialog"]',
+  ],
 };
 
 /** 反馈观察结果 */
 export interface SubmitFeedback {
-  kind: 'SUCCESS_TOAST' | 'FAILURE_TOAST' | 'LOADING' | 'NONE';
+  kind: 'SUCCESS_TOAST' | 'FAILURE_TOAST' | 'LOADING' | 'PANEL_OPENED' | 'NONE';
   text?: string;
 }
 
@@ -75,6 +83,26 @@ function queryDeep(selector: string, root: Document | ShadowRoot = document, dep
     if (sr) out.push(...queryDeep(selector, sr, depth + 1));
   }
   return out;
+}
+
+/**
+ * 查找妙手点击后弹出的采集面板
+ * 实测点击“采集此商品”后会新增约 3000 个节点并出现 1 个 shadow root，
+ * 面板通常挂在 class 含 collect/panel/dialog 的容器上
+ * @param selectors 面板容器候选选择器
+ * @param shadowBaseline 点击前已有的可见 shadow 宿主数量（用于避免误判）
+ * @returns 命中的面板容器，未出现返回 null
+ */
+function findOpenedPanel(selectors: string[], shadowBaseline: number): Element | null {
+  for (const sel of selectors) {
+    const el = queryDeep(sel).find((e) => isVisibleAndClickable(e));
+    if (el) return el;
+  }
+  // 兜底：只有在点击后“新增”的可见 shadow 宿主才算面板，避免页面原本就有 shadow 而误判
+  const hosts = Array.from(document.querySelectorAll('*')).filter(
+    (el) => el.shadowRoot && isVisibleAndClickable(el),
+  );
+  return hosts.length > shadowBaseline ? hosts[hosts.length - 1] : null;
 }
 
 /**
@@ -190,10 +218,26 @@ export function createMiaoshouAdapter(
    */
   function observeFeedback(timeoutMs: number): Promise<SubmitFeedback> {
     return new Promise((resolve) => {
+      // 记录点击前的 shadow 宿主数量，用于判断“点击后新增面板”
+      const shadowBaseline = countShadowHosts();
       const timer = setTimeout(() => {
         observer.disconnect();
+        clearInterval(panelTimer);
         resolve({ kind: 'NONE' });
       }, timeoutMs);
+      // 妙手点击后会弹出较大的采集面板（不是 toast）；轮询检测面板是否出现
+      const panelTimer = setInterval(() => {
+        const panel = findOpenedPanel(config.panelSelectors, shadowBaseline);
+        if (panel) {
+          clearTimeout(timer);
+          clearInterval(panelTimer);
+          observer.disconnect();
+          resolve({
+            kind: 'PANEL_OPENED',
+            text: `${panel.tagName.toLowerCase()}.${(panel.getAttribute('class') ?? '').slice(0, 60)}`,
+          });
+        }
+      }, 400);
       const check = (raw: string): SubmitFeedback | null => {
         const text = normalizeText(raw).slice(0, 120);
         if (config.feedback.successText.some((t) => text.includes(normalizeText(t)))) {
@@ -215,6 +259,7 @@ export function createMiaoshouAdapter(
               const fb = check(text);
               if (fb && fb.kind !== 'LOADING') {
                 clearTimeout(timer);
+                clearInterval(panelTimer);
                 observer.disconnect();
                 resolve(fb);
                 return;
@@ -302,14 +347,27 @@ export function createMiaoshouAdapter(
       if (fb.kind === 'SUCCESS_TOAST') {
         return { submitted: true, evidence: `已点击 ${desc}；提交后出现成功反馈: ${fb.text?.slice(0, 120)}` };
       }
+      if (fb.kind === 'PANEL_OPENED') {
+        return {
+          submitted: true,
+          evidence: `已点击 ${desc}；插件采集面板已弹出（${fb.text?.slice(0, 80)}，${delta}）`,
+        };
+      }
       if (fb.kind === 'FAILURE_TOAST') {
         return { submitted: false, evidence: `已点击 ${desc}；失败反馈: ${fb.text?.slice(0, 120)}`, errorCode: 'MIAOSHOU_FEEDBACK_FAILURE' };
       }
-      // 无明确反馈：点击动作已发出但无提交证据；同时记录 DOM 变化量用于判断点击是否真的生效
+      // 无 toast 但 DOM 显著增长：说明点击被插件接受（面板/表单已渲染）
+      if (after.nodes - before.nodes > 100 || after.shadows > before.shadows) {
+        return {
+          submitted: true,
+          evidence: `已点击 ${desc}；未出现 toast，但点击后 ${delta}，判定插件已响应`,
+        };
+      }
+      // 无任何变化：点击被忽略或点错元素
       return {
         submitted: false,
-        evidence: `已点击 ${desc}；未观察到明确提交反馈；点击后 ${delta}（PoC 待验证反馈探针）`,
-        errorCode: 'MIAOSHOU_NO_FEEDBACK',
+        evidence: `已点击 ${desc}；点击后 ${delta}，页面无变化（疑似点击被忽略）`,
+        errorCode: 'MIAOSHOU_CLICK_IGNORED',
       };
     },
 

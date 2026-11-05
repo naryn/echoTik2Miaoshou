@@ -24,32 +24,53 @@ const MAX_ENTRIES = 300;
 /** 落盘防抖（毫秒） */
 const FLUSH_DELAY_MS = 400;
 
-/** 内存缓冲（已加载的历史 + 新日志） */
-let buffer: DebugLogEntry[] = [];
-/** 是否已从存储加载 */
-let loaded = false;
-/** 待落盘标记 */
+/** 内存缓冲（仅本上下文新增、尚未落盘的日志） */
+let pending: DebugLogEntry[] = [];
+/** 落盘防抖中标记 */
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** 把待写日志延迟落盘，避免每条日志都读写存储 */
+/**
+ * 把待写日志延迟落盘
+ * 多个上下文（后台/内容脚本/侧边栏）共享同一存储键，因此采用“读-合并-写”而不是整体覆盖，
+ * 避免后写者把前者的日志冲掉
+ */
 function scheduleFlush(): void {
   if (flushTimer != null) return;
   flushTimer = setTimeout(() => {
     flushTimer = null;
-    void browser.storage.local.set({ [DEBUG_LOG_KEY]: buffer.slice(-MAX_ENTRIES) });
+    void flush();
   }, FLUSH_DELAY_MS);
 }
 
-/** 首次使用时加载历史日志（失败则从空缓冲开始，不影响主流程） */
-async function ensureLoaded(): Promise<void> {
-  if (loaded) return;
-  loaded = true;
+/** 将 pending 合并进存储中的历史日志 */
+async function flush(): Promise<void> {
+  if (!pending.length) return;
+  const batch = pending;
+  pending = [];
+  try {
+    const got = await browser.storage.local.get(DEBUG_LOG_KEY);
+    const prev = Array.isArray(got?.[DEBUG_LOG_KEY]) ? (got[DEBUG_LOG_KEY] as DebugLogEntry[]) : [];
+    const seen = new Set(prev.map((e) => `${e.t}|${e.scope}|${e.msg}|${e.data ?? ''}`));
+    const appended = batch.filter((e) => !seen.has(`${e.t}|${e.scope}|${e.msg}|${e.data ?? ''}`));
+    const merged = [...prev, ...appended]
+      .sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0))
+      .slice(-MAX_ENTRIES);
+    await browser.storage.local.set({ [DEBUG_LOG_KEY]: merged });
+  } catch {
+    // 日志写入失败不影响主流程
+  }
+}
+
+/**
+ * 读取存储中的全部日志（供读取接口使用，包含其他上下文写入的内容）
+ */
+async function loadFromStorage(): Promise<DebugLogEntry[]> {
   try {
     const got = await browser.storage.local.get(DEBUG_LOG_KEY);
     const arr = got?.[DEBUG_LOG_KEY];
-    if (Array.isArray(arr)) buffer = arr.slice(-MAX_ENTRIES);
+    return Array.isArray(arr) ? (arr as DebugLogEntry[]) : [];
   } catch {
-    buffer = [];
+    return [];
   }
 }
 
@@ -71,24 +92,24 @@ export async function dlog(scope: string, msg: string, data?: unknown): Promise<
   const entry: DebugLogEntry = { t: new Date().toISOString(), scope, msg, data: extra };
   // 控制台始终输出，便于在 TikTok 页/后台直接查看
   console.log(`[EchoTik][${scope}] ${msg}${extra ? ` | ${extra}` : ''}`);
-  await ensureLoaded();
-  buffer.push(entry);
-  if (buffer.length > MAX_ENTRIES) buffer = buffer.slice(-MAX_ENTRIES);
+  pending.push(entry);
+  if (pending.length > MAX_ENTRIES) pending = pending.slice(-MAX_ENTRIES);
   scheduleFlush();
 }
 
 /**
- * 读取最近调试日志
+ * 读取最近调试日志（合并存储中所有上下文写入的日志）
  * @param limit 条数上限（按时间升序返回）
  */
 export async function readDebugLogs(limit = 100): Promise<DebugLogEntry[]> {
-  await ensureLoaded();
-  return buffer.slice(-Math.max(1, limit));
+  // 先落盘本上下文未写出的日志，保证读到的内容完整
+  await flush();
+  const all = await loadFromStorage();
+  return all.slice(-Math.max(1, limit));
 }
 
 /** 清空调试日志 */
 export async function clearDebugLogs(): Promise<void> {
-  buffer = [];
-  loaded = true;
+  pending = [];
   await browser.storage.local.set({ [DEBUG_LOG_KEY]: [] });
 }
