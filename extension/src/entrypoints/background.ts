@@ -872,12 +872,37 @@ export default defineBackground(() => {
   async function collectSingleProduct(
     externalProductId: string,
     region: string,
-  ): Promise<{ batch_id: string }> {
+  ): Promise<{ batch_id: string; closed_batch_ids?: string[] }> {
     const cp = await loadCheckpoint();
     if (cp.active_task_id) {
       throw new Error('当前有任务正在执行，请先完成或暂停后再采集');
     }
     const api = getApi();
+    // 单客户端只允许一个活跃批次：上次异常退出（SW 重启/页面停滞）会留下僵尸 RUNNING 批次，
+    // 直接阻塞新批次创建，这里先结束它再继续，并把被结束的批次回传给界面；
+    // PAUSED 属于用户主动暂停，不自动结束，改为明确提示
+    const closed: string[] = [];
+    const running = await api.listBatches({ status: 'RUNNING', per_page: 100 });
+    for (const b of running.items) {
+      await api.batchAction(b.batch_id, 'cancel', { client_id: await storageGet('client_id') });
+      closed.push(b.batch_id);
+    }
+    const paused = await api.listBatches({ status: 'PAUSED', per_page: 100 });
+    if (paused.items.length > 0) {
+      throw new Error(
+        `存在已暂停的批次 ${paused.items[0]!.batch_id}，请先在「任务」页停止后再采集`,
+      );
+    }
+    if (closed.length > 0) {
+      // 清掉旧检查点，避免残留的 task/lease 让新批次无法推进
+      await saveCheckpoint({
+        ...(await loadCheckpoint()),
+        active_batch_id: null,
+        active_task_id: null,
+        runner_stage: 'IDLE',
+        paused: false,
+      });
+    }
     // 本地商品记录只有外部 ID，需先从服务端商品表解析内部 product_id
     const found = await api.listProducts({ keyword: externalProductId, region, per_page: 20 });
     const hit = found.items.find((p) => p.external_product_id === externalProductId);
@@ -901,7 +926,7 @@ export default defineBackground(() => {
     });
     await claimAndStart(batch.batch_id);
     await broadcastState();
-    return { batch_id: batch.batch_id };
+    return { batch_id: batch.batch_id, closed_batch_ids: closed.length ? closed : undefined };
   }
 
   /**

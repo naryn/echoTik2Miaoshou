@@ -139,7 +139,7 @@ export interface MessageMap {
   /** 单件商品直接采集（商品列表页测试 ERP 采集用：建单商品批次并立即启动） */
   'product.collectSingle': {
     req: { external_product_id: string; region: string };
-    res: { batch_id: string };
+    res: { batch_id: string; closed_batch_ids?: string[] };
   };
   /** 批次列表（附聚合进度） */
   'batch.list': {

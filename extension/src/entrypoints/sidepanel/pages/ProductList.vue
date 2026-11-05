@@ -206,7 +206,10 @@ async function collectOne(p: ProductItem): Promise<void> {
       external_product_id: p.external_product_id,
       region,
     });
-    feedback.value = `已创建并开始采集：${r.batch_id}（单商品，强制重抓）。可在「任务」页查看进度。`;
+    const closed = r.closed_batch_ids?.length
+      ? `（已结束残留批次 ${r.closed_batch_ids.join('、')}）`
+      : '';
+    feedback.value = `已创建并开始采集：${r.batch_id}${closed}（单商品，强制重抓）。可在「任务」页查看进度。`;
   } catch (e) {
     errorText.value = classifyError(e).text;
   } finally {
