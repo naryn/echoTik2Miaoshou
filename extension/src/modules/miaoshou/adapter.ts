@@ -80,6 +80,7 @@ function queryDeep(selector: string, root: Document | ShadowRoot = document, dep
  * 收集页面结构诊断信息（用于定位按钮到底藏在哪里）
  * - 开放 shadow root 宿主数量
  * - iframe 数量与来源域名（跨域 iframe 内容自研脚本无法访问）
+ * - 关键词命中数量（妙手/ERP/采集），用于判断插件是否已注入
  */
 function collectStructureHints(): string {
   const shadowHosts = Array.from(document.querySelectorAll('*')).filter(
@@ -95,7 +96,13 @@ function collectStructureHints(): string {
     }
   });
   const hosts = iframes.slice(0, 5).join(',');
-  return `shadow 宿主 ${shadowHosts} 个；iframe ${iframes.length} 个${hosts ? `（${hosts}）` : ''}`;
+  const hits = ['妙手', 'ERP', '采集箱'].map((kw) => {
+    const n = Array.from(document.querySelectorAll('body *')).filter((el) =>
+      (el.textContent ?? '').includes(kw),
+    ).length;
+    return `${kw}:${n}`;
+  });
+  return `shadow 宿主 ${shadowHosts} 个；iframe ${iframes.length} 个${hosts ? `（${hosts}）` : ''}；关键词命中 ${hits.join(' ')}`;
 }
 
 /**
@@ -188,13 +195,20 @@ export function createMiaoshouAdapter(
   return {
     /**
      * 检测妙手采集能力是否可用（含证据说明）
+     * 妙手插件的内容脚本通常在页面加载完成后才注入按钮，因此这里轮询等待而非单次判定
      */
     async detectAvailability() {
-      const btn = findButton();
+      const startedAt = Date.now();
+      let btn = findButton();
+      // 轮询等待插件注入（最长 30 秒，每 800ms 检查一次）
+      while (!btn && Date.now() - startedAt < 30_000) {
+        await new Promise((r) => setTimeout(r, 800));
+        btn = findButton();
+      }
       if (btn) {
         return {
           available: true,
-          evidence: `候选按钮命中: ${btn.tagName}.${(btn.getAttribute('class') ?? '').slice(0, 80)} (选择器版本 ${config.version}，PoC 待验证)`,
+          evidence: `候选按钮命中: ${btn.tagName}.${(btn.getAttribute('class') ?? '').slice(0, 80)}（等待 ${Math.round((Date.now() - startedAt) / 1000)}s，选择器版本 ${config.version}，PoC 待验证）`,
         };
       }
       // 未命中时给出可诊断线索：页面正文是否真的出现“采集”字样
@@ -204,7 +218,7 @@ export function createMiaoshouAdapter(
         : '页面正文不含“采集”字样（妙手插件可能未加载或未适配该页面）';
       return {
         available: false,
-        evidence: `未命中任何候选探针：${hint}；${collectStructureHints()} (选择器版本 ${config.version})`,
+        evidence: `等待 30s 未命中任何候选探针：${hint}；${collectStructureHints()} (选择器版本 ${config.version})`,
         reason: 'MIAOSHOU_BUTTON_NOT_FOUND',
       };
     },
@@ -222,7 +236,13 @@ export function createMiaoshouAdapter(
      * 触发采集动作并观察反馈
      */
     async submitCollectAction() {
-      const btn = findButton();
+      const startedAt = Date.now();
+      let btn = findButton();
+      // 提交前再等一次（适配页面刚渲染完成、按钮稍后出现的场景）
+      while (!btn && Date.now() - startedAt < 10_000) {
+        await new Promise((r) => setTimeout(r, 400));
+        btn = findButton();
+      }
       if (!btn) return { submitted: false, errorCode: 'MIAOSHOU_BUTTON_NOT_FOUND' };
       const feedbackPromise = observeFeedback(8_000);
       (btn as HTMLElement).click();
