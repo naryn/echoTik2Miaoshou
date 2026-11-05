@@ -21,6 +21,7 @@ import type {
   SnapshotSummary,
   TaskItem,
 } from './remote';
+import type { DebugLogEntry } from '@/modules/debug/log';
 
 /** 消息信封 */
 export interface MessageEnvelope<K extends keyof MessageMap> {
@@ -203,6 +204,10 @@ export interface MessageMap {
       server: { connected: boolean; latency_ms: number | null };
     };
   };
+
+  // ---- 调试日志（跨上下文环形缓冲） ----
+  'debug.readLogs': { req: { limit?: number }; res: { items: DebugLogEntry[] } };
+  'debug.clearLogs': { req: void; res: { ok: true } };
 
   // ---- background → EchoTik content script ----
   'echotik.checkLogin': {

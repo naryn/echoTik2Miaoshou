@@ -10,6 +10,7 @@ import { defineContentScript } from 'wxt/utils/define-content-script';
 import { wrapHandler } from '@/shared/messaging';
 import { createMiaoshouAdapter } from '@/modules/miaoshou/adapter';
 import { detectChallenge, isRecovered, type ChallengeSignals } from '@/modules/challenge/detector';
+import { dlog } from '@/modules/debug/log';
 
 export default defineContentScript({
   matches: ['https://www.tiktok.com/shop/*', 'https://shop.tiktok.com/*'],
@@ -43,8 +44,10 @@ export default defineContentScript({
             return probe(payload.expectedProductId);
           })(msg.payload as { expectedProductId: string }, null);
         case 'tiktok.detectMiaoshou':
+          await dlog('tiktok', '收到检测妙手请求', { url: location.href.slice(0, 100) });
           return wrapHandler<'tiktok.detectMiaoshou'>(async () => miaoshou.detectAvailability())(undefined, null);
         case 'tiktok.submitCollect':
+          await dlog('tiktok', '收到提交采集请求');
           return wrapHandler<'tiktok.submitCollect'>(async () => miaoshou.submitCollectAction())(undefined, null);
         case 'tiktok.verifyCollect':
           return wrapHandler<'tiktok.verifyCollect'>(async (payload) => {
@@ -150,6 +153,7 @@ export default defineContentScript({
       const signals = collectSignals();
       const verdict = detectChallenge(signals);
       if (verdict.state === 'CHALLENGE' || verdict.state === 'ACCESS_RESTRICTED') {
+        await dlog('tiktok', 'probe: 命中验证/限制', { matched: verdict.matchedRules.join(',') });
         return {
           state: verdict.state,
           evidence: `命中规则: ${verdict.matchedRules.join(', ')}`,
@@ -158,6 +162,7 @@ export default defineContentScript({
       // 地区不可用优先于商品证据判断：页面会正常渲染但没有购买区
       const regionHit = detectRegionUnavailable(signals.bodyTextSample ?? '');
       if (regionHit) {
+        await dlog('tiktok', 'probe: 地区不可用', { hit: regionHit });
         return { state: 'REGION_UNAVAILABLE', evidence: regionHit };
       }
       const urlProductId = productIdFromUrl(location.href);
@@ -174,6 +179,7 @@ export default defineContentScript({
       if (!signals.productEvidenceFound) {
         return { state: 'LOADING', productId: urlProductId, reason: '商品内容尚未渲染' };
       }
+      await dlog('tiktok', 'probe: 页面就绪', { productId: urlProductId });
       return { state: 'READY', productId: urlProductId, evidence: 'URL 商品 ID 匹配且页面证据存在' };
     }
 

@@ -8,6 +8,7 @@
  * 本模块运行于 TikTok 商品页 content script（ISOLATED world）内。
  */
 import type { IMiaoshouAdapter } from '@/shared/types/domain';
+import { dlog } from '@/modules/debug/log';
 
 /** 选择器配置（版本化，PoC 后更新） */
 export interface MiaoshouSelectorConfig {
@@ -233,6 +234,7 @@ export function createMiaoshouAdapter(
      */
     async detectAvailability() {
       const startedAt = Date.now();
+      await dlog('miaoshou', '开始检测采集按钮', { readyState: document.readyState, url: location.href.slice(0, 120) });
       let btn = findButton();
       // 轮询等待插件注入（最长 30 秒，每 800ms 检查一次）
       while (!btn && Date.now() - startedAt < 30_000) {
@@ -240,9 +242,11 @@ export function createMiaoshouAdapter(
         btn = findButton();
       }
       if (btn) {
+        const waited = Math.round((Date.now() - startedAt) / 1000);
+        await dlog('miaoshou', '命中采集按钮', { waitedSec: waited, tag: btn.tagName, cls: (btn.getAttribute('class') ?? '').slice(0, 60), text: normalizeText(btn.textContent ?? '').slice(0, 20) });
         return {
           available: true,
-          evidence: `候选按钮命中: ${btn.tagName}.${(btn.getAttribute('class') ?? '').slice(0, 80)}（等待 ${Math.round((Date.now() - startedAt) / 1000)}s，选择器版本 ${config.version}，PoC 待验证）`,
+          evidence: `候选按钮命中: ${btn.tagName}.${(btn.getAttribute('class') ?? '').slice(0, 80)}（等待 ${waited}s，选择器版本 ${config.version}，PoC 待验证）`,
         };
       }
       // 未命中时给出可诊断线索：页面正文是否真的出现“采集”字样
@@ -250,6 +254,7 @@ export function createMiaoshouAdapter(
       const hint = pageText.includes('采集')
         ? '页面正文含“采集”字样，但未找到可见可点击的按钮节点'
         : '页面正文不含“采集”字样（妙手插件可能未加载或未适配该页面）';
+      await dlog('miaoshou', '未命中采集按钮', { hint, structure: collectStructureHints() });
       return {
         available: false,
         evidence: `等待 30s 未命中任何候选探针：${hint}；${collectStructureHints()} (选择器版本 ${config.version})`,
@@ -279,16 +284,21 @@ export function createMiaoshouAdapter(
         await new Promise((r) => setTimeout(r, 400));
         btn = findButton();
       }
-      if (!btn) return { submitted: false, errorCode: 'MIAOSHOU_BUTTON_NOT_FOUND' };
+      if (!btn) {
+        await dlog('miaoshou', '提交前未找到按钮');
+        return { submitted: false, errorCode: 'MIAOSHOU_BUTTON_NOT_FOUND' };
+      }
       // 文字节点常是按钮内部的 span，向上找真正的可点击容器再点
       const clickTarget = btn.closest('button, a, [role="button"], [class*="btn"], [class*="button"]') ?? btn;
       const desc = `${clickTarget.tagName.toLowerCase()}.${(clickTarget.getAttribute('class') ?? '').slice(0, 60)} text="${normalizeText(clickTarget.textContent ?? '').slice(0, 20)}"`;
       const before = { nodes: document.querySelectorAll('body *').length, shadows: countShadowHosts() };
+      await dlog('miaoshou', '派发点击', { target: desc, nodes: before.nodes, shadows: before.shadows });
       const feedbackPromise = observeFeedback(12_000);
       dispatchRealClick(clickTarget);
       const fb = await feedbackPromise;
       const after = { nodes: document.querySelectorAll('body *').length, shadows: countShadowHosts() };
       const delta = `节点 +${after.nodes - before.nodes}，shadow 宿主 +${after.shadows - before.shadows}`;
+      await dlog('miaoshou', '点击后反馈', { kind: fb.kind, text: (fb.text ?? '').slice(0, 60), delta });
       if (fb.kind === 'SUCCESS_TOAST') {
         return { submitted: true, evidence: `已点击 ${desc}；提交后出现成功反馈: ${fb.text?.slice(0, 120)}` };
       }

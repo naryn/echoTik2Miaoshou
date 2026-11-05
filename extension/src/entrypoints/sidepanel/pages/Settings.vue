@@ -217,9 +217,42 @@ async function exportDiagnostics(): Promise<void> {
     behavior_config: behavior.value,
     outbox_pending: dataStats.value.outbox,
     env: env.value,
+    debug_logs: debugLogs.value,
   };
   downloadText(`echotik-diagnostics-${Date.now()}.json`, JSON.stringify(diag, null, 2), 'application/json');
   feedback.value = '诊断信息已导出（不含凭证）。';
+}
+
+/** 调试日志（最近 100 条） */
+const debugLogs = ref<{ t: string; scope: string; msg: string; data?: string }[]>([]);
+const debugLoading = ref(false);
+
+/**
+ * 刷新调试日志（走 background，读取跨上下文环形缓冲）
+ */
+async function loadDebugLogs(): Promise<void> {
+  debugLoading.value = true;
+  try {
+    const r = await sendMsg('debug.readLogs', { limit: 100 });
+    debugLogs.value = r.items;
+  } catch (e) {
+    feedback.value = classifyError(e).text;
+  } finally {
+    debugLoading.value = false;
+  }
+}
+
+/**
+ * 清空调试日志
+ */
+async function clearDebugLogs(): Promise<void> {
+  try {
+    await sendMsg('debug.clearLogs', undefined);
+    debugLogs.value = [];
+    feedback.value = '调试日志已清空。';
+  } catch (e) {
+    feedback.value = classifyError(e).text;
+  }
 }
 
 /**
@@ -243,7 +276,7 @@ onMounted(async () => {
   serverUrlEdit.value = localInfo.value.server_url;
   exec.value = await loadExecConfig();
   behavior.value = await loadBehaviorConfig();
-  await Promise.all([loadMe(), checkEnv(), loadTiktokTabs(), loadDataStats()]);
+  await Promise.all([loadMe(), checkEnv(), loadTiktokTabs(), loadDataStats(), loadDebugLogs()]);
 });
 </script>
 
@@ -385,6 +418,24 @@ onMounted(async () => {
         <button class="act" @click="manualSync">手动同步</button>
         <button class="act" @click="clearCache">清理缓存（不删远程任务）</button>
         <button class="act" @click="exportDiagnostics">导出诊断信息</button>
+      </div>
+    </div>
+
+    <!-- 调试日志：跨上下文环形缓冲，用于排查采集流程卡点 -->
+    <div class="card">
+      <h3>调试日志</h3>
+      <div class="small">最近 {{ debugLogs.length }} 条（最多保留 300 条，跨后台/内容脚本/侧边栏共享）。</div>
+      <div class="btn-row" style="flex-wrap: wrap">
+        <button class="act" :disabled="debugLoading" @click="loadDebugLogs">{{ debugLoading ? '刷新中…' : '刷新' }}</button>
+        <button class="act" @click="clearDebugLogs">清空</button>
+      </div>
+      <div v-if="debugLogs.length" style="max-height: 260px; overflow: auto; margin-top: 8px; font-family: ui-monospace, monospace; font-size: 11px; line-height: 1.5; background: #0f172a; color: #e2e8f0; border-radius: 6px; padding: 8px">
+        <div v-for="(l, i) in debugLogs" :key="i" style="white-space: pre-wrap; word-break: break-all">
+          <span style="color: #64748b">{{ l.t.slice(11, 19) }}</span>
+          <span style="color: #38bdf8">[{{ l.scope }}]</span>
+          <span>{{ l.msg }}</span>
+          <span v-if="l.data" style="color: #a5b4fc">{{ l.data }}</span>
+        </div>
       </div>
     </div>
 

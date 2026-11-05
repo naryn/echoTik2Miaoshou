@@ -26,6 +26,7 @@ import {
 import { createApiClient, ApiError, type ApiClient } from '@/modules/api/client';
 import { createEchoTikAdapter, type EchoTikTransport } from '@/modules/echotik/adapter';
 import { ensureSingleTikTokTab, clearWorkerTabIfMatches, resolveDetailUrl } from '@/modules/tiktok/tab-manager';
+import { dlog, clearDebugLogs, readDebugLogs } from '@/modules/debug/log';
 import {
   createTaskStateMachine,
   isTerminal,
@@ -284,6 +285,14 @@ export default defineBackground(() => {
     const cp = await loadCheckpoint();
     if (!cp.active_batch_id || cp.paused) return;
     const stage = cp.runner_stage;
+    // 调试日志：记录每次推进的触发原因与当前阶段，便于排查“任务卡住/没动作”
+    await dlog('background', 'runStage', {
+      why,
+      stage,
+      task: cp.active_task_id?.slice(0, 12),
+      tab: cp.worker_tab_id,
+      product: cp.product?.external_product_id,
+    });
     if (!stage || stage === 'IDLE') {
       await scheduleClaimNext(cp.active_batch_id);
       return;
@@ -1335,6 +1344,13 @@ export default defineBackground(() => {
         return { synced: Math.max(0, before - remaining), remaining };
       }),
       'env.check': wrapHandler<'env.check'>(async () => envCheck()),
+      'debug.readLogs': wrapHandler<'debug.readLogs'>(async (payload) => ({
+        items: await readDebugLogs(payload?.limit ?? 100),
+      })),
+      'debug.clearLogs': wrapHandler<'debug.clearLogs'>(async () => {
+        await clearDebugLogs();
+        return { ok: true as const };
+      }),
       'widget.openDashboard': wrapHandler<'widget.openDashboard'>(async () => {
         await openSidePanel(sender);
         return { opened: true as const };
