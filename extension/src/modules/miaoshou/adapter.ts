@@ -77,15 +77,43 @@ function queryDeep(selector: string, root: Document | ShadowRoot = document, dep
 }
 
 /**
+ * 模拟真实鼠标点击：滚动到可见区域后依次派发 pointer/mouse 事件
+ * 部分插件只响应完整指针序列，裸 HTMLElement.click() 会被静默忽略
+ * @param el 目标元素
+ */
+function dispatchRealClick(el: Element): void {
+  el.scrollIntoView({ block: 'center', inline: 'center' });
+  const rect = el.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+  const base = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, view: window };
+  const pointer = { ...base, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+  el.dispatchEvent(new PointerEvent('pointerover', pointer));
+  el.dispatchEvent(new MouseEvent('mouseover', base));
+  el.dispatchEvent(new PointerEvent('pointerdown', pointer));
+  el.dispatchEvent(new MouseEvent('mousedown', base));
+  el.dispatchEvent(new PointerEvent('pointerup', pointer));
+  el.dispatchEvent(new MouseEvent('mouseup', base));
+  el.dispatchEvent(new MouseEvent('click', base));
+  // 兜底：有些实现只挂在原生 click 上
+  if (el instanceof HTMLElement) el.click();
+}
+
+/**
+ * 统计页面中带 shadow root 的元素数量
+ */
+function countShadowHosts(): number {
+  return Array.from(document.querySelectorAll('*')).filter((el) => el.shadowRoot).length;
+}
+
+/**
  * 收集页面结构诊断信息（用于定位按钮到底藏在哪里）
  * - 开放 shadow root 宿主数量
  * - iframe 数量与来源域名（跨域 iframe 内容自研脚本无法访问）
  * - 关键词命中数量（妙手/ERP/采集），用于判断插件是否已注入
  */
 function collectStructureHints(): string {
-  const shadowHosts = Array.from(document.querySelectorAll('*')).filter(
-    (el) => (el as Element).shadowRoot,
-  ).length;
+  const shadowHosts = countShadowHosts();
   const iframes = Array.from(document.querySelectorAll('iframe')).map((f) => {
     const src = f.getAttribute('src');
     if (!src) return 'inline';
@@ -135,16 +163,22 @@ export function createMiaoshouAdapter(
       const el = queryDeep(sel)[0];
       if (el && isVisibleAndClickable(el)) return el;
     }
-    // 2) 文案兜底：归一化后匹配（去掉零宽/方向控制字符与空白）
-    const candidates = queryDeep('button, a, div[role="button"], span[role="button"], div, span');
+    // 2) 文案匹配：优先真正的交互元素（button/a/role=button），减少命中普通文本节点
     const wanted = config.textCandidates.map(normalizeText);
-    for (const el of candidates) {
+    const textMatch = (el: Element): boolean => {
       const text = normalizeText(el.textContent ?? '');
-      if (!text) continue;
+      if (!text) return false;
       // 只接受「自身文案即按钮文案」的节点，避免命中整页容器
-      if (wanted.some((t) => text === t || (text.includes(t) && text.length <= t.length + 6)) && isVisibleAndClickable(el)) {
-        return el;
-      }
+      return wanted.some(
+        (t) => text === t || (text.includes(t) && text.length <= t.length + 6),
+      );
+    };
+    for (const el of queryDeep('button, a, [role="button"]')) {
+      if (textMatch(el) && isVisibleAndClickable(el)) return el;
+    }
+    // 3) 兜底：普通节点上的文字按钮
+    for (const el of queryDeep('div, span')) {
+      if (textMatch(el) && isVisibleAndClickable(el)) return el;
     }
     return null;
   }
@@ -234,6 +268,8 @@ export function createMiaoshouAdapter(
 
     /**
      * 触发采集动作并观察反馈
+     * 使用完整指针事件序列（pointerdown/mousedown/mouseup/click）而不是裸 .click()，
+     * 因为多数插件用 pointer/mouse 事件做守卫，裸 click 可能被静默忽略
      */
     async submitCollectAction() {
       const startedAt = Date.now();
@@ -244,19 +280,25 @@ export function createMiaoshouAdapter(
         btn = findButton();
       }
       if (!btn) return { submitted: false, errorCode: 'MIAOSHOU_BUTTON_NOT_FOUND' };
-      const feedbackPromise = observeFeedback(8_000);
-      (btn as HTMLElement).click();
+      // 文字节点常是按钮内部的 span，向上找真正的可点击容器再点
+      const clickTarget = btn.closest('button, a, [role="button"], [class*="btn"], [class*="button"]') ?? btn;
+      const desc = `${clickTarget.tagName.toLowerCase()}.${(clickTarget.getAttribute('class') ?? '').slice(0, 60)} text="${normalizeText(clickTarget.textContent ?? '').slice(0, 20)}"`;
+      const before = { nodes: document.querySelectorAll('body *').length, shadows: countShadowHosts() };
+      const feedbackPromise = observeFeedback(12_000);
+      dispatchRealClick(clickTarget);
       const fb = await feedbackPromise;
+      const after = { nodes: document.querySelectorAll('body *').length, shadows: countShadowHosts() };
+      const delta = `节点 +${after.nodes - before.nodes}，shadow 宿主 +${after.shadows - before.shadows}`;
       if (fb.kind === 'SUCCESS_TOAST') {
-        return { submitted: true, evidence: `提交后出现成功反馈: ${fb.text?.slice(0, 120)}` };
+        return { submitted: true, evidence: `已点击 ${desc}；提交后出现成功反馈: ${fb.text?.slice(0, 120)}` };
       }
       if (fb.kind === 'FAILURE_TOAST') {
-        return { submitted: false, evidence: fb.text?.slice(0, 120), errorCode: 'MIAOSHOU_FEEDBACK_FAILURE' };
+        return { submitted: false, evidence: `已点击 ${desc}；失败反馈: ${fb.text?.slice(0, 120)}`, errorCode: 'MIAOSHOU_FEEDBACK_FAILURE' };
       }
-      // 无明确反馈：点击动作已发出但无提交证据
+      // 无明确反馈：点击动作已发出但无提交证据；同时记录 DOM 变化量用于判断点击是否真的生效
       return {
         submitted: false,
-        evidence: '点击已触发但未观察到明确提交反馈（PoC 待验证反馈探针）',
+        evidence: `已点击 ${desc}；未观察到明确提交反馈；点击后 ${delta}（PoC 待验证反馈探针）`,
         errorCode: 'MIAOSHOU_NO_FEEDBACK',
       };
     },
