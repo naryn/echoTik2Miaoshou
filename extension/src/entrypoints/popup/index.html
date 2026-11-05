@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>EchoTik 采集助手</title>
+    <style>
+      body {
+        margin: 0;
+        width: 260px;
+        font: 13px/1.5 -apple-system, "PingFang SC", system-ui, sans-serif;
+        color: #111827;
+      }
+      .wrap { padding: 12px; }
+      h1 { font-size: 14px; margin: 0 0 8px; }
+      .row { margin: 6px 0; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; background: #d1d5db; }
+      .dot.on { background: #22c55e; }
+      .dot.off { background: #ef4444; }
+      button {
+        width: 100%; padding: 8px; border: none; border-radius: 8px;
+        background: #2563eb; color: #fff; cursor: pointer; font-size: 13px;
+      }
+      button:hover { background: #1d4ed8; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

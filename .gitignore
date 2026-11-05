@@ -1,0 +1,25 @@
+# 依赖与构建产物
+extension/node_modules/
+extension/.output/
+extension/.wxt/
+extension/*.tsbuildinfo
+server/.venv/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+
+# 本地数据库与运行时产物
+server/data/*.db
+server/data/*.db-wal
+server/data/*.db-shm
+
+# 环境与密钥
+.env
+.env.local
+
+# 系统与编辑器
+.DS_Store
+*.log
+
+# 临时分享产物
+.trae-html-share-packages/

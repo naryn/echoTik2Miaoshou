@@ -1,0 +1,15 @@
+# MVP 阶段：远程 API 服务（SQLite 持久化到本地 volume）
+services:
+  api:
+    build: ./server
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: sqlite:////data/echotik.db
+      LEASE_TTL_SECONDS: "600"
+    volumes:
+      - server-data:/data
+    restart: unless-stopped
+
+volumes:
+  server-data:
