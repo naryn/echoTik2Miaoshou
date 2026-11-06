@@ -1,11 +1,12 @@
 /**
- * Side Panel Vue 应用入口：挂载路由与全局状态 store
+ * 管理台 Vue 应用入口（独立扩展页面 manager.html）：挂载路由与全局状态 store
  */
 import { createApp } from 'vue';
 import { createRouter, createMemoryHistory } from 'vue-router';
 import App from './App.vue';
 import Dashboard from './pages/Dashboard.vue';
 import RankingCollector from './pages/RankingCollector.vue';
+import RankingHistory from './pages/RankingHistory.vue';
 import ProductList from './pages/ProductList.vue';
 import BatchTasks from './pages/BatchTasks.vue';
 import AttemptLog from './pages/AttemptLog.vue';
@@ -19,6 +20,7 @@ const router = createRouter({
   routes: [
     { path: '/', name: 'dashboard', component: Dashboard, meta: { title: '概览' } },
     { path: '/ranking', name: 'ranking', component: RankingCollector, meta: { title: '榜单采集' } },
+    { path: '/ranking-history', name: 'ranking-history', component: RankingHistory, meta: { title: '历史榜单' } },
     { path: '/products', name: 'products', component: ProductList, meta: { title: '商品列表' } },
     { path: '/tasks', name: 'tasks', component: BatchTasks, meta: { title: '任务' } },
     { path: '/logs', name: 'logs', component: AttemptLog, meta: { title: '日志' } },

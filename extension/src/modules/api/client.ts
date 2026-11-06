@@ -8,7 +8,9 @@
 import type { z } from 'zod';
 import {
   ActiveTaskResponseSchema,
+  AdminClientListSchema,
   ApiEnvelopeSchema,
+  AuthMeSchema,
   AttemptItemSchema,
   BatchDetailSchema,
   BatchItemSchema,
@@ -16,13 +18,19 @@ import {
   ClientMeSchema,
   ProductItemSchema,
   RankHistoryResponseSchema,
+  RankingPresetListSchema,
+  RankingPresetSchema,
   RegisterResponseSchema,
   SnapshotCreateResponseSchema,
   SnapshotSummarySchema,
   TaskItemSchema,
   paginatedSchema,
   type ActiveTaskResponse,
+  type AdminBatchQuery,
+  type AdminClientList,
+  type AdminProductQuery,
   type AttemptItem,
+  type AuthMe,
   type BatchDetail,
   type BatchItem,
   type ClaimTaskResponse,
@@ -30,12 +38,13 @@ import {
   type Paginated,
   type ProductItem,
   type RankHistoryResponse,
+  type RankingPreset,
   type RegisterResponse,
   type SnapshotCreateResponse,
   type SnapshotSummary,
   type TaskItem,
 } from '@/shared/types/remote';
-import { ERROR_CODES, type ErrorCode, type RankingQuery } from '@/shared/types/domain';
+import { ERROR_CODES, getPeriodStartDate, getPeriodType, type ErrorCode, type RankingQuery } from '@/shared/types/domain';
 
 /**
  * 构建 URL query string（跳过 undefined/null/空串）
@@ -74,6 +83,8 @@ export interface ApiClientOptions {
   maxRetries?: number;
   /** 惰性获取鉴权信息（避免在模块加载时读取 storage） */
   getAuth: () => Promise<{ client_id: string | null; client_token: string | null }>;
+  /** 插件设置中填写的 auth token（Bearer 认证，所有请求携带） */
+  getAuthToken?: () => Promise<string | null>;
 }
 
 /** 默认超时与重试参数 */
@@ -94,7 +105,7 @@ export function createApiClient(opts: ApiClientOptions) {
    * @param path 路径（/v1/...）
    * @param body 请求体
    * @param schema data 字段 zod schema（可选）
-   * @param auth 是否需要鉴权头
+   * @param auth 是否携带客户端身份头（旧版 X-Client-Id/X-Client-Token 兼容）
    */
   async function request<T>(
     method: string,
@@ -116,6 +127,9 @@ export function createApiClient(opts: ApiClientOptions) {
           if (client_id) headers['X-Client-Id'] = client_id;
           if (client_token) headers['X-Client-Token'] = client_token;
         }
+        // 认证 Token（插件设置填写）：服务端优先按 Bearer 解析账号与角色
+        const authToken = (await opts.getAuthToken?.()) ?? null;
+        if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
         const baseUrl = await opts.getBaseUrl();
         const resp = await fetch(`${baseUrl}${path}`, {
           method,
@@ -188,6 +202,17 @@ export function createApiClient(opts: ApiClientOptions) {
       return request('GET', '/v1/clients/me/active-task', null, ActiveTaskResponseSchema.nullable()) as Promise<ActiveTaskResponse | null>;
     },
 
+    // ---- 账号级榜单筛选预设 ----
+    listRankingPresets() {
+      return request('GET', '/v1/ranking-presets', null, RankingPresetListSchema) as Promise<{ items: RankingPreset[] }>;
+    },
+    saveRankingPreset(name: string, queryJson: Record<string, unknown>) {
+      return request('PUT', '/v1/ranking-presets', { name, query_json: queryJson }, RankingPresetSchema) as Promise<RankingPreset>;
+    },
+    deleteRankingPreset(presetId: string) {
+      return request('DELETE', `/v1/ranking-presets/${encodeURIComponent(presetId)}`, null, null) as Promise<{ deleted: boolean }>;
+    },
+
     // ---- 榜单快照 ----
     /**
      * 创建榜单快照
@@ -201,17 +226,25 @@ export function createApiClient(opts: ApiClientOptions) {
       request_id: string;
     }) {
       const { query } = payload;
+      // 新管理台将周期统一存放在 query.period；旧版则使用 rankingType/
+      // periodStart。写入快照时必须同时兼容两种结构，服务端 ranking_type
+      // 为必填字段，不能把 undefined 序列化后交给服务端处理。
+      const rankingType = getPeriodType(query);
+      if (!rankingType) {
+        throw new ApiError(ERROR_CODES.SERVER_ERROR, '采集参数缺少榜单时间类型', false);
+      }
       return request(
         'POST',
         '/v1/rank-snapshots',
         {
           request_id: payload.request_id,
+          source_platform: query.source ?? 'ECHOTIK',
           region: query.region,
-          ranking_type: query.rankingType,
+          ranking_type: rankingType,
           ranking_variant: query.rankingVariant ?? null,
           category_id: query.categoryId ?? null,
-          period_start: query.periodStart ?? null,
-          period_end: query.periodEnd ?? null,
+          period_start: getPeriodStartDate(query) ?? null,
+          period_end: query.period?.endDate ?? query.periodEnd ?? null,
           filter_json: payload.filter_json,
         },
         SnapshotCreateResponseSchema,
@@ -356,6 +389,61 @@ export function createApiClient(opts: ApiClientOptions) {
         null,
         paginatedSchema(AttemptItemSchema),
       ) as Promise<Paginated<AttemptItem>>;
+    },
+
+    // ---- 认证（插件填写 auth token）----
+    /** 查询当前 auth token 对应的账号、角色与共享客户端 ID */
+    authMe() {
+      return request('GET', '/v1/auth/me', null, AuthMeSchema, false) as Promise<AuthMe>;
+    },
+
+    // ---- 管理员（auth_users.role=ADMIN，只读）----
+    /** 管理员：全量客户端列表（不含 token，用于归属筛选） */
+    adminListClients() {
+      return request('GET', '/v1/admin/clients', null, AdminClientListSchema, false) as Promise<AdminClientList>;
+    },
+    /** 管理员：全量采集批次列表（可按客户端/状态/日期筛选） */
+    adminListBatches(params: AdminBatchQuery) {
+      return request(
+        'GET',
+        `/v1/admin/batches${buildQueryString(params)}`,
+        null,
+        paginatedSchema(BatchItemSchema),
+        false,
+      ) as Promise<Paginated<BatchItem>>;
+    },
+    /** 管理员：任意客户端批次详情 */
+    adminGetBatch(batchId: string) {
+      return request(
+        'GET',
+        `/v1/admin/batches/${encodeURIComponent(batchId)}`,
+        null,
+        BatchItemSchema,
+        false,
+      ) as Promise<BatchItem>;
+    },
+    /** 管理员：任意批次任务明细分页 */
+    adminListBatchTasks(
+      batchId: string,
+      params: { status?: string; page?: number; per_page?: number },
+    ) {
+      return request(
+        'GET',
+        `/v1/admin/batches/${encodeURIComponent(batchId)}/tasks${buildQueryString(params)}`,
+        null,
+        paginatedSchema(TaskItemSchema),
+        false,
+      ) as Promise<Paginated<TaskItem>>;
+    },
+    /** 管理员：全量商品筛选分页（支持批次/快照/来源平台） */
+    adminListProducts(params: AdminProductQuery) {
+      return request(
+        'GET',
+        `/v1/admin/products${buildQueryString(params)}`,
+        null,
+        paginatedSchema(ProductItemSchema),
+        false,
+      ) as Promise<Paginated<ProductItem>>;
     },
 
     // ---- 任务 ----

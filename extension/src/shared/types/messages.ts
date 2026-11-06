@@ -5,14 +5,20 @@
  */
 import type {
   RankingQuery,
+  RankingSource,
   RankingPage,
   RuntimePublicState,
   RunnerCheckpoint,
   CategoryNode,
   ProductRankingEntry,
 } from './domain';
+import type { RankingPreset } from './remote';
 import type {
+  AdminBatchQuery,
+  AdminClientList,
+  AdminProductQuery,
   AttemptItem,
+  AuthMe,
   BatchItem,
   ClientMe,
   Paginated,
@@ -41,7 +47,6 @@ export interface MessageMap {
 
   // ---- UI → background ----
   'client.getState': { req: void; res: RuntimePublicState };
-  'client.register': { req: { server_url?: string } | void; res: { client_id: string } };
   'client.testConnection': { req: void; res: { connected: boolean; latency_ms: number } };
   'client.updateServerUrl': { req: { server_url: string }; res: { saved: true } };
   'runner.start': { req: { batchId: string }; res: { started: true } };
@@ -50,6 +55,11 @@ export interface MessageMap {
   'runner.cancel': { req: void; res: { cancelled: true } };
   'runner.getCheckpoint': { req: void; res: RunnerCheckpoint };
   'ranking.startCollect': { req: { query: RankingQuery }; res: { snapshot_local_id: string } };
+  'ranking.runPresetBatch': { req: { queries: RankingQuery[] }; res: { started: number } };
+  'ranking.presetBatchProgress': { req: void; res: { running: boolean; current: number; total: number; completed: number; failed: number } };
+  'rankingPreset.list': { req: void; res: { items: RankingPreset[] } };
+  'rankingPreset.save': { req: { name: string; query: RankingQuery }; res: RankingPreset };
+  'rankingPreset.delete': { req: { preset_id: string }; res: { deleted: boolean } };
   'ranking.getProgress': {
     req: void;
     res: {
@@ -68,6 +78,7 @@ export interface MessageMap {
   /** 历史榜单快照筛选分页 */
   'snapshot.list': {
     req: {
+      source_platform?: string;
       region?: string;
       ranking_type?: string;
       category_id?: string;
@@ -79,9 +90,9 @@ export interface MessageMap {
     };
     res: Paginated<SnapshotSummary>;
   };
-  /** 读取当前 EchoTik 页面筛选并启动采集（复用 ranking.startCollect 流程） */
+  /** 读取当前页面筛选并启动采集（source 决定读哪个平台的页面） */
   'snapshot.createFromCurrent': {
-    req: { overrides?: Partial<RankingQuery> } | void;
+    req: { source?: RankingSource; overrides?: Partial<RankingQuery> } | void;
     res: { started: true };
   };
   /** 取消进行中的榜单分页抓取（已抓数据保留并标 PARTIAL） */
@@ -96,13 +107,53 @@ export interface MessageMap {
     req: { force?: boolean } | void;
     res: { items: CategoryNode[]; cached: boolean; fetched_at: string };
   };
-  /** 商品服务端分页/筛选/排序 */
+  /** 已注册的榜单来源平台（UI 平台下拉用） */
+  'ranking.sources': {
+    req: void;
+    res: {
+      items: {
+        id: RankingSource;
+        label: string;
+        origin: string;
+        boardUrl: string;
+        available: boolean;
+        unavailableReason?: string;
+      }[];
+    };
+  };
+  // ---- FastMoss 页面桥（ISOLATED content script ↔ background） ----
+  /** 读取页面捕获到的榜单接口调用（用于回放模板） */
+  'fastmoss.readCapturedCalls': {
+    req: void;
+    res: { calls: FastMossCapturedCall[] };
+  };
+  /** 在页面上下文回放请求（携带页面登录态） */
+  'fastmoss.fetchApi': {
+    req: {
+      path: string;
+      params?: Record<string, string | number>;
+      method?: 'GET' | 'POST';
+      body?: unknown;
+      /** 回放时需要携带的签名头（_time / cnonce / fm-sign 等） */
+      headers?: Record<string, string>;
+    };
+    res: unknown;
+  };
+  /** 读取 FastMoss 榜单页 URL 中的筛选条件 */
+  'fastmoss.readPageSelection': { req: void; res: Partial<RankingQuery> };
+  /** FastMoss 登录态探测 */
+  'fastmoss.checkLogin': { req: void; res: { logged_in: boolean; evidence: string } };
+  /** 商品列表（服务端分页/筛选，普通账号自动按自身数据隔离） */
   'product.list': {
     req: {
       keyword?: string;
       region?: string;
       category?: string;
       ranking_type?: string;
+      ranking_variant?: string;
+      source_platform?: string;
+      snapshot_id?: string;
+      batch_id?: string;
       snapshot_date_from?: string;
       snapshot_date_to?: string;
       rank_min?: number;
@@ -115,28 +166,8 @@ export interface MessageMap {
     };
     res: Paginated<ProductItem>;
   };
-  /** 商品榜单历史 */
+  /** 商品榜单历史（普通账号自动按自身快照隔离） */
   'product.rankHistory': { req: { product_id: string }; res: RankHistoryResponse };
-  /** 本地采集商品分页/筛选/排序（数据源为 IndexedDB，不访问远端列表） */
-  'product.listLocal': {
-    req: {
-      keyword?: string;
-      region?: string;
-      category?: string;
-      ranking_variant?: string;
-      date_from?: string;
-      date_to?: string;
-      rank_min?: number;
-      rank_max?: number;
-      /** 按批次过滤：只保留该批次任务包含的商品 */
-      batch_id?: string;
-      sort?: string;
-      order?: 'asc' | 'desc';
-      page?: number;
-      per_page?: number;
-    };
-    res: Paginated<ProductItem>;
-  };
   /** 单件商品直接采集（商品列表页测试 ERP 采集用：建单商品批次并立即启动） */
   'product.collectSingle': {
     req: { external_product_id: string; region: string };
@@ -192,6 +223,27 @@ export interface MessageMap {
   };
   /** 当前客户端信息（远程 /v1/clients/me） */
   'client.me': { req: void; res: ClientMe };
+  // ---- 认证 Token（插件设置填写，Bearer 认证）----
+  /** 查询当前 token 的账号/角色/共享客户端 */
+  'auth.me': { req: void; res: AuthMe };
+  /** 保存并验证 auth token；成功后切换账号身份 */
+  'auth.setToken': { req: { token: string }; res: AuthMe };
+  /** 清除 auth token（退出授权） */
+  'auth.clear': { req: void; res: { ok: boolean } };
+  // ---- 管理员（auth_users.role=ADMIN，只读） ----
+  /** 管理员：全量客户端列表 */
+  'admin.listClients': { req: void; res: AdminClientList };
+  /** 管理员：全量采集批次列表 */
+  'admin.listBatches': { req: AdminBatchQuery; res: Paginated<BatchItem> };
+  /** 管理员：任意批次详情 */
+  'admin.getBatch': { req: { batch_id: string }; res: BatchItem };
+  /** 管理员：任意批次任务明细 */
+  'admin.batchTasks': {
+    req: { batch_id: string; status?: string; page?: number; per_page?: number };
+    res: Paginated<TaskItem>;
+  };
+  /** 管理员：全量商品列表 */
+  'admin.listProducts': { req: AdminProductQuery; res: Paginated<ProductItem> };
   /** 手动触发 outbox 补传（返回本次成功补传条数） */
   'outbox.flush': { req: void; res: { synced: number; remaining: number } };
   /** 页面环境探测：EchoTik 登录态 / TikTok 工作 Tab / 妙手检测 / 服务器连通 */
@@ -293,7 +345,50 @@ export const PAGE_BRIDGE = {
   RESPONSE: 'ECHOTIK_EXT_BRIDGE_RESPONSE',
 } as const;
 
-/** MAIN world 桥请求体 */
+/** FastMoss 页面桥协议常量（MAIN world 钩子 ↔ ISOLATED world） */
+export const FAST_MOSS_BRIDGE = {
+  /** 读取已捕获的接口调用 */
+  LIST: 'TK_FM_LIST',
+  LIST_RESULT: 'TK_FM_LIST_RESULT',
+  /** 在页面上下文回放请求 */
+  FETCH: 'TK_FM_FETCH',
+  FETCH_RESULT: 'TK_FM_FETCH_RESULT',
+} as const;
+
+/** FastMoss 捕获到的接口调用（跨 world 传输结构） */
+export interface FastMossCapturedCall {
+  method: 'GET' | 'POST';
+  url: string;
+  body?: string;
+  /** 请求头（仅保留签名/鉴权相关，如 _time / cnonce / fm-sign） */
+  headers?: Record<string, string>;
+  topKeys?: string[];
+  status?: number;
+  at: string;
+}
+
+/** FastMoss 页面桥请求体 */
+export interface FastMossBridgeRequest {
+  type: typeof FAST_MOSS_BRIDGE.LIST | typeof FAST_MOSS_BRIDGE.FETCH;
+  nonce: string;
+  /** FETCH 时使用 */
+  method?: 'GET' | 'POST';
+  url?: string;
+  body?: unknown;
+  headers?: Record<string, string>;
+}
+
+/** FastMoss 页面桥响应体 */
+export interface FastMossBridgeResponse {
+  type: typeof FAST_MOSS_BRIDGE.LIST_RESULT | typeof FAST_MOSS_BRIDGE.FETCH_RESULT;
+  nonce: string;
+  ok: boolean;
+  data?: unknown;
+  error?: string;
+  status?: number;
+}
+
+/** MAIN world 桥请求体（EchoTik 页面同源请求） */
 export interface PageBridgeRequest {
   type: typeof PAGE_BRIDGE.REQUEST;
   nonce: string;

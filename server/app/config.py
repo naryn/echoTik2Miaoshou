@@ -8,6 +8,10 @@ DEFAULT_DB_PATH = os.path.join(BASE_DIR, "data", "echotik.db")
 
 DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{DEFAULT_DB_PATH}")
 
+# 榜单数据来源平台白名单与默认值（扩展可上报多个榜单源，区别于 Product.platform）
+ALLOWED_SOURCE_PLATFORMS = {"ECHOTIK", "FASTMOSS"}
+DEFAULT_SOURCE_PLATFORM = "ECHOTIK"
+
 # 任务租约默认时长（秒），规范默认 10 分钟
 LEASE_TTL_SECONDS = int(os.environ.get("LEASE_TTL_SECONDS", "600"))
 

@@ -54,6 +54,41 @@ class CollectorClient(Base):
     client_token: Mapped[str] = mapped_column(String(128), nullable=False)
 
 
+class AuthUser(Base):
+    """认证账号：插件填写的 auth token 与角色（服务端表内维护）。
+
+    同一 token 在任意浏览器/设备上解析为同一个 client_id，从而实现数据共享；
+    role=ADMIN 可读取全部客户端数据，role=USER 仅能读取自身数据。
+    """
+
+    __tablename__ = "auth_users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(128), default="")
+    role: Mapped[str] = mapped_column(String(16), default="USER", nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="ACTIVE", nullable=False)
+    client_id: Mapped[str | None] = mapped_column(
+        ForeignKey("collector_clients.client_id"), nullable=True, unique=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RankingPreset(Base):
+    """账号共享的榜单筛选预设（通过绑定的 client_id 隔离）。"""
+
+    __tablename__ = "ranking_presets"
+    __table_args__ = (UniqueConstraint("client_id", "name", name="uq_ranking_preset_client_name"),)
+
+    preset_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: new_id("preset"))
+    client_id: Mapped[str] = mapped_column(ForeignKey("collector_clients.client_id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    query_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class Product(Base):
     """商品主数据，按 (platform, region, external_product_id) 全局去重。"""
 
@@ -102,6 +137,11 @@ class RankSnapshot(Base):
 
     snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: new_id("snap"))
     client_id: Mapped[str] = mapped_column(ForeignKey("collector_clients.client_id"), nullable=False, index=True)
+    # 榜单数据来源平台：ECHOTIK / FASTMOSS（区别于 Product.platform 的电商平台）
+    # 历史数据由 init_db 迁移回填 ECHOTIK
+    source_platform: Mapped[str] = mapped_column(
+        String(16), default="ECHOTIK", nullable=False, index=True
+    )
     region: Mapped[str] = mapped_column(String(16), nullable=False)
     ranking_type: Mapped[str] = mapped_column(String(32), nullable=False)
     ranking_variant: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -147,6 +187,8 @@ class CollectionBatch(Base):
 
     batch_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: new_id("batch"))
     client_id: Mapped[str] = mapped_column(ForeignKey("collector_clients.client_id"), nullable=False, index=True)
+    # 榜单数据来源平台：优先继承来源快照，无快照时取请求值
+    source_platform: Mapped[str] = mapped_column(String(16), default="ECHOTIK", nullable=False)
     source_snapshot_id: Mapped[str | None] = mapped_column(
         ForeignKey("rank_snapshots.snapshot_id"), nullable=True
     )

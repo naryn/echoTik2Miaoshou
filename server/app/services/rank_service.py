@@ -2,11 +2,18 @@
 
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import MAX_ENTRIES_BATCH
-from app.models import Category, CollectionTask, Product, RankEntry, RankSnapshot
+from app.models import (
+    Category,
+    CollectionBatch,
+    CollectionTask,
+    Product,
+    RankEntry,
+    RankSnapshot,
+)
 from app.models.orm import new_id, utcnow
 from app.services import idempotency
 from app.services.errors import ApiError, not_found
@@ -20,6 +27,7 @@ def create_snapshot(
     request_id: str,
     region: str,
     ranking_type: str,
+    source_platform: str = "ECHOTIK",
     ranking_variant: str | None = None,
     category_id: str | None = None,
     period_start: str | None = None,
@@ -28,6 +36,7 @@ def create_snapshot(
 ) -> tuple[RankSnapshot, bool]:
     """创建榜单快照；request_id 幂等，重复请求返回同一快照。
 
+    :param source_platform: 榜单数据来源平台（ECHOTIK / FASTMOSS），默认 ECHOTIK
     :return: (快照, 是否新建)
     """
     existing = idempotency.find_snapshot_by_request_id(db, request_id)
@@ -39,6 +48,7 @@ def create_snapshot(
         request_id=request_id,
         region=region,
         ranking_type=ranking_type,
+        source_platform=source_platform,
         ranking_variant=ranking_variant,
         category_id=category_id,
         period_start=period_start,
@@ -187,12 +197,13 @@ def list_snapshots(
     ranking_type: str | None = None,
     category_id: str | None = None,
     status: str | None = None,
+    source_platform: str | None = None,
     date_from: datetime | None = None,
     date_to: datetime | None = None,
     page: int = 1,
     per_page: int = 20,
 ) -> tuple[list[RankSnapshot], int]:
-    """按站点/榜单类型/分类/状态/日期范围筛选快照并分页。"""
+    """按站点/榜单类型/分类/状态/数据来源平台/日期范围筛选快照并分页。"""
     stmt = select(RankSnapshot)
     count_stmt = select(func.count(RankSnapshot.snapshot_id))
     filters = []
@@ -200,6 +211,8 @@ def list_snapshots(
         filters.append(RankSnapshot.client_id == client_id)
     if region:
         filters.append(RankSnapshot.region == region)
+    if source_platform:
+        filters.append(RankSnapshot.source_platform == source_platform)
     if ranking_type:
         filters.append(RankSnapshot.ranking_type == ranking_type)
     if category_id:
@@ -247,11 +260,16 @@ def list_products(
     region: str | None = None,
     category: str | None = None,
     ranking_type: str | None = None,
+    ranking_variant: str | None = None,
+    source_platform: str | None = None,
+    snapshot_id: str | None = None,
+    batch_id: str | None = None,
     snapshot_date_from: datetime | None = None,
     snapshot_date_to: datetime | None = None,
     rank_min: int | None = None,
     rank_max: int | None = None,
     erp_status: str | None = None,
+    scope_client_id: str | None = None,
     sort: str = "last_seen_at",
     order: str = "desc",
     page: int = 1,
@@ -261,6 +279,9 @@ def list_products(
 
     erp_status 依据该商品最新任务状态推导，无任务时为 NEVER。
     分类筛选按分类名称匹配（categories.name 模糊匹配后映射快照 category_id）。
+    ranking_variant/source_platform/snapshot_id/batch_id 供管理端全量查询使用，
+    普通商品接口不传这些参数时行为保持不变。
+    scope_client_id 非空时仅返回该客户端快照或批次任务涉及的商品，实现账号级隔离。
     """
     latest_status = _latest_task_status_subquery(db)
 
@@ -286,7 +307,17 @@ def list_products(
 
     # 需要关联榜单明细/快照的筛选条件
     need_entry_join = any(
-        [category, ranking_type, snapshot_date_from, snapshot_date_to, rank_min, rank_max]
+        [
+            category,
+            ranking_type,
+            ranking_variant,
+            source_platform,
+            snapshot_id,
+            snapshot_date_from,
+            snapshot_date_to,
+            rank_min,
+            rank_max,
+        ]
     ) or sort == "rank_position"
     if need_entry_join:
         stmt = stmt.join(RankEntry, RankEntry.product_id == Product.id).join(
@@ -316,6 +347,15 @@ def list_products(
         if ranking_type:
             stmt = stmt.where(RankSnapshot.ranking_type == ranking_type)
             count_stmt = count_stmt.where(RankSnapshot.ranking_type == ranking_type)
+        if ranking_variant:
+            stmt = stmt.where(RankSnapshot.ranking_variant == ranking_variant)
+            count_stmt = count_stmt.where(RankSnapshot.ranking_variant == ranking_variant)
+        if source_platform:
+            stmt = stmt.where(RankSnapshot.source_platform == source_platform)
+            count_stmt = count_stmt.where(RankSnapshot.source_platform == source_platform)
+        if snapshot_id:
+            stmt = stmt.where(RankSnapshot.snapshot_id == snapshot_id)
+            count_stmt = count_stmt.where(RankSnapshot.snapshot_id == snapshot_id)
         if snapshot_date_from:
             stmt = stmt.where(RankSnapshot.capture_started_at >= snapshot_date_from)
             count_stmt = count_stmt.where(RankSnapshot.capture_started_at >= snapshot_date_from)
@@ -329,6 +369,35 @@ def list_products(
             stmt = stmt.where(RankEntry.rank_position <= rank_max)
             count_stmt = count_stmt.where(RankEntry.rank_position <= rank_max)
         stmt = stmt.group_by(Product.id, latest_status.c.status)
+
+    # 按批次过滤：仅保留该批次任务涉及的商品（管理端跨客户端查看批次商品用）
+    if batch_id:
+        task_product_ids = select(CollectionTask.product_id).where(
+            CollectionTask.batch_id == batch_id
+        )
+        stmt = stmt.where(Product.id.in_(task_product_ids))
+        count_stmt = count_stmt.where(Product.id.in_(task_product_ids))
+
+    # 账号级隔离：普通账号仅可见自己快照或自己批次任务涉及的商品
+    if scope_client_id:
+        own_snapshots = select(RankSnapshot.snapshot_id).where(
+            RankSnapshot.client_id == scope_client_id
+        )
+        own_batches = select(CollectionBatch.batch_id).where(
+            CollectionBatch.client_id == scope_client_id
+        )
+        own_rank_products = select(RankEntry.product_id).where(
+            RankEntry.snapshot_id.in_(own_snapshots)
+        )
+        own_task_products = select(CollectionTask.product_id).where(
+            CollectionTask.batch_id.in_(own_batches)
+        )
+        scope_cond = or_(
+            Product.id.in_(own_rank_products),
+            Product.id.in_(own_task_products),
+        )
+        stmt = stmt.where(scope_cond)
+        count_stmt = count_stmt.where(scope_cond)
 
     if erp_status:
         if erp_status == "NEVER":
@@ -367,12 +436,17 @@ def get_product_or_404(db: Session, product_id: str) -> Product:
     return product
 
 
-def product_rank_history(db: Session, product_id: str) -> list[tuple[RankEntry, RankSnapshot]]:
-    """查询商品全部榜单历史（rank_entries 关联快照信息，按时间倒序）。"""
-    rows = db.execute(
+def product_rank_history(
+    db: Session, product_id: str, scope_client_id: str | None = None
+) -> list[tuple[RankEntry, RankSnapshot]]:
+    """查询商品榜单历史；scope_client_id 非空时仅返回该客户端快照。"""
+    stmt = (
         select(RankEntry, RankSnapshot)
         .join(RankSnapshot, RankSnapshot.snapshot_id == RankEntry.snapshot_id)
         .where(RankEntry.product_id == product_id)
         .order_by(RankEntry.observed_at.desc())
-    ).all()
+    )
+    if scope_client_id:
+        stmt = stmt.where(RankSnapshot.client_id == scope_client_id)
+    rows = db.execute(stmt).all()
     return [(entry, snapshot) for entry, snapshot in rows]

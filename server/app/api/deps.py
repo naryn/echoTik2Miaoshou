@@ -1,15 +1,17 @@
-"""API 依赖与统一响应包装：客户端鉴权、request_id 上下文、响应信封。"""
+"""API 依赖与统一响应包装：认证身份、request_id 上下文、响应信封。"""
 
 import contextvars
 import uuid
+from dataclasses import dataclass
 
 from fastapi import Depends, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import CollectorClient
-from app.services.errors import unauthorized
+from app.models import AuthUser, CollectorClient
+from app.services import auth_service
+from app.services.errors import admin_forbidden, unauthorized
 
 # 请求级 request_id，由中间件写入，响应包装统一读取
 _request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -42,17 +44,65 @@ def error_body(code: str, message: str, retryable: bool) -> dict:
     }
 
 
-def require_client(request: Request, db: Session = Depends(get_db)) -> CollectorClient:
-    """写接口鉴权：校验 X-Client-Id + X-Client-Token 头并返回客户端实体。"""
+@dataclass
+class Identity:
+    """请求认证身份：客户端实体 + 可选认证账号 + 角色。"""
+
+    client: CollectorClient
+    user: AuthUser | None
+    role: str
+
+
+def _bearer_token(request: Request) -> str | None:
+    """从 Authorization: Bearer 或 X-Auth-Token 头提取 auth token。"""
+    header = request.headers.get("Authorization", "")
+    if header.lower().startswith("bearer "):
+        token = header[7:].strip()
+        if token:
+            return token
+    return request.headers.get("X-Auth-Token") or None
+
+
+def require_identity(
+    request: Request, db: Session = Depends(get_db)
+) -> Identity:
+    """解析请求认证身份。
+
+    优先使用插件填写的 auth token（Bearer）；为兼容旧版本/自动化测试，
+    仍接受 X-Client-Id + X-Client-Token 头，此时角色视为普通用户。
+    """
+    token = _bearer_token(request)
+    if token:
+        user, client = auth_service.resolve_identity(db, token)
+        if client.status != "ACTIVE":
+            raise unauthorized(f"客户端状态为 {client.status}")
+        return Identity(client=client, user=user, role=(user.role or "USER").upper())
+
     client_id = request.headers.get("X-Client-Id")
-    token = request.headers.get("X-Client-Token")
-    if not client_id or not token:
-        raise unauthorized("缺少 X-Client-Id / X-Client-Token 请求头")
+    client_token = request.headers.get("X-Client-Token")
+    if not client_id or not client_token:
+        raise unauthorized("缺少认证 Token（请在插件设置中填写 auth token）")
     client = db.execute(
         select(CollectorClient).where(CollectorClient.client_id == client_id)
     ).scalar_one_or_none()
-    if client is None or client.client_token != token:
+    if client is None or client.client_token != client_token:
         raise unauthorized()
     if client.status != "ACTIVE":
         raise unauthorized(f"客户端状态为 {client.status}")
-    return client
+    return Identity(client=client, user=None, role="USER")
+
+
+def require_client(
+    identity: Identity = Depends(require_identity),
+) -> CollectorClient:
+    """写接口鉴权：返回当前认证身份的客户端实体。"""
+    return identity.client
+
+
+def require_admin(
+    identity: Identity = Depends(require_identity),
+) -> Identity:
+    """管理端鉴权：仅 auth_users 表中 role=ADMIN 的账号可访问。"""
+    if identity.role != "ADMIN":
+        raise admin_forbidden("需要管理员权限（auth_users.role=ADMIN）")
+    return identity

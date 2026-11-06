@@ -115,6 +115,8 @@ export interface Paginated<T> {
 export const SnapshotSummarySchema = z.object({
   snapshot_id: z.string(),
   client_id: z.string().optional(),
+  /** 榜单数据来源平台（ECHOTIK / FASTMOSS），历史快照可能为空（视为 ECHOTIK） */
+  source_platform: z.string().nullable().optional(),
   region: z.string().nullable().optional(),
   ranking_type: z.string().nullable().optional(),
   ranking_variant: z.string().nullable().optional(),
@@ -144,6 +146,8 @@ export const ProductItemSchema = z.object({
   first_seen_at: z.string().nullable().optional(),
   last_seen_at: z.string().nullable().optional(),
   raw_excerpt: z.record(z.unknown()).nullable().optional(),
+  /** 榜单来源平台（ECHOTIK / FASTMOSS） */
+  source_platform: z.string().nullable().optional(),
   erp_status: z.string().nullable().optional(),
 });
 export type ProductItem = z.infer<typeof ProductItemSchema>;
@@ -186,6 +190,8 @@ export type BatchSummary = z.infer<typeof BatchSummarySchema>;
 export const BatchItemSchema = z.object({
   batch_id: z.string(),
   client_id: z.string().optional(),
+  /** 来源榜单平台（ECHOTIK / FASTMOSS） */
+  source_platform: z.string().nullable().optional(),
   source_snapshot_id: z.string().nullable().optional(),
   parent_batch_id: z.string().nullable().optional(),
   status: BatchStatusSchema,
@@ -200,6 +206,7 @@ export const BatchItemSchema = z.object({
   snapshot: z
     .object({
       snapshot_id: z.string().optional(),
+      source_platform: z.string().nullable().optional(),
       region: z.string().nullable().optional(),
       ranking_type: z.string().nullable().optional(),
       ranking_variant: z.string().nullable().optional(),
@@ -259,3 +266,64 @@ export const ClientMeSchema = z.object({
   extension_version: z.string().nullable().optional(),
 });
 export type ClientMe = z.infer<typeof ClientMeSchema>;
+
+/** 认证身份（服务端 /v1/auth/me） */
+export const AuthMeSchema = z.object({
+  client_id: z.string(),
+  display_name: z.string().nullable().optional(),
+  role: z.enum(['USER', 'ADMIN']).or(z.string()),
+  registered_at: z.string().nullable().optional(),
+  extension_version: z.string().nullable().optional(),
+  last_seen_at: z.string().nullable().optional(),
+});
+export type AuthMe = z.infer<typeof AuthMeSchema>;
+
+/** 服务端账号级榜单筛选预设。 */
+export const RankingPresetSchema = z.object({
+  preset_id: z.string(),
+  name: z.string(),
+  query_json: z.record(z.unknown()),
+  created_at: z.string().nullable().optional(),
+  updated_at: z.string().nullable().optional(),
+});
+export type RankingPreset = z.infer<typeof RankingPresetSchema>;
+export const RankingPresetListSchema = z.object({ items: z.array(RankingPresetSchema) });
+
+/** 管理员：全量客户端列表响应 */
+export const AdminClientListSchema = z.object({
+  items: z.array(ClientMeSchema),
+});
+export type AdminClientList = z.infer<typeof AdminClientListSchema>;
+
+/** 管理员：全量商品列表查询参数（服务端 /v1/admin/products） */
+export interface AdminProductQuery {
+  [key: string]: string | number | undefined;
+  keyword?: string;
+  region?: string;
+  category?: string;
+  ranking_type?: string;
+  ranking_variant?: string;
+  source_platform?: string;
+  snapshot_id?: string;
+  batch_id?: string;
+  snapshot_date_from?: string;
+  snapshot_date_to?: string;
+  rank_min?: number;
+  rank_max?: number;
+  erp_status?: string;
+  sort?: string;
+  order?: 'asc' | 'desc';
+  page?: number;
+  per_page?: number;
+}
+
+/** 管理员：全量批次列表查询参数（服务端 /v1/admin/batches） */
+export interface AdminBatchQuery {
+  [key: string]: string | number | undefined;
+  client_id?: string;
+  status?: string;
+  date_from?: string;
+  date_to?: string;
+  page?: number;
+  per_page?: number;
+}

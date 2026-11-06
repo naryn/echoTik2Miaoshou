@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app.models import CollectionBatch, CollectionTask, Product, RankEntry
+from app.models import CollectionBatch, CollectionTask, Product, RankEntry, RankSnapshot
 from app.models.orm import utcnow
 from app.services import idempotency
 from app.services.errors import ApiError, conflict, not_found
@@ -36,6 +36,7 @@ def create_batch(
     client_id: str,
     idempotency_key: str,
     snapshot_id: str | None = None,
+    source_platform: str = "ECHOTIK",
     product_ids: list[str] | None = None,
     exclude_already_successful: bool = False,
     config: dict | None = None,
@@ -50,6 +51,7 @@ def create_batch(
       时拒绝新建，除非 force=True。
     - exclude_already_successful=True 时排除该客户端已 SUCCESS 的商品。
     - recollect=True 时新任务带 FORCE_RECOLLECT 标记，领取阶段跳过去重（单商品测试用）。
+    - source_platform：带 snapshot_id 时继承快照的来源平台，否则使用请求值。
 
     :return: (批次, 是否新建, 被排除的商品数；幂等重放时为 None)
     """
@@ -105,8 +107,16 @@ def create_batch(
     if not candidates:
         raise ApiError("EMPTY_BATCH", "排除已成功商品后批次为空", retryable=False)
 
+    # 来源平台：优先继承快照，避免批次丢失榜单来源标记
+    batch_source_platform = source_platform
+    if snapshot_id:
+        snapshot = db.get(RankSnapshot, snapshot_id)
+        if snapshot is not None:
+            batch_source_platform = snapshot.source_platform
+
     batch = CollectionBatch(
         client_id=client_id,
+        source_platform=batch_source_platform,
         source_snapshot_id=snapshot_id,
         parent_batch_id=parent_batch_id,
         status="READY",
@@ -327,6 +337,7 @@ def retry_failed(
         db,
         client_id=client_id,
         idempotency_key=idempotency_key,
+        source_platform=source_batch.source_platform,
         product_ids=product_ids,
         exclude_already_successful=False,
         config={"retry_of": source_batch.batch_id},

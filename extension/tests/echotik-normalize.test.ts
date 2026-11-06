@@ -68,15 +68,19 @@ describe('normalizeRankingItem', () => {
 });
 
 describe('EchoTikAdapter.fetchRankingPage', () => {
-  it('按接口实际契约组装参数并解析分页（单页上限 10）', async () => {
+  it('按接口实际契约组装参数并解析分页（单页上限 50）', async () => {
     const calls: Array<{ path: string; params: Record<string, string | number> }> = [];
+    const fullPage = Array.from({ length: 50 }, (_, i) => ({
+      ...sampleItem,
+      product_id: `${i}732052189676081387`,
+    }));
     const adapter = createEchoTikAdapter({
       async request(path, params) {
         calls.push({ path, params });
         return {
           code: 0,
           msg: 'ok',
-          data: [sampleItem],
+          data: fullPage,
           meta: { current_page: 1, last_page: 4, per_page: 50, total: 200 },
         };
       },
@@ -87,14 +91,15 @@ describe('EchoTikAdapter.fetchRankingPage', () => {
       time_type: 'daily',
       time_range: '20261103',
       page: 1,
-      // 免费套餐 per_page 上限 10，传 50 会被会员限制页拦截
-      per_page: 10,
-      product_categories: '',
+      // 显式指定单页 50 条（文档示例 per_page=50）
+      per_page: 50,
+      '__echotik_region': 'US',
+      'product_categories[]': '',
       order: 'sale_cnt',
     });
     expect(page.hasMore).toBe(true);
     expect(page.total).toBe(200);
-    expect(page.records).toHaveLength(1);
+    expect(page.records).toHaveLength(50);
   });
 
   it('code=401 抛出未授权错误', async () => {
@@ -122,7 +127,7 @@ describe('EchoTikAdapter.fetchRankingPage', () => {
     const caps = await adapter.capabilities();
     expect(caps.variants).toEqual(['top-sold', 'hot-sell', 'news-burst', 'products']);
     expect(caps.timeTypes).toEqual(['daily', 'weekly', 'monthly']);
-    expect(caps.maxPerPage).toBe(10);
+    expect(caps.maxPerPage).toBe(50);
   });
 
   it('fetchAllRankings 在重复页/无下一页时终止', async () => {
@@ -130,12 +135,13 @@ describe('EchoTikAdapter.fetchRankingPage', () => {
     const adapter = createEchoTikAdapter({
       async request() {
         page += 1;
-        // 第 2 页返回与第 1 页完全相同的数据 → 触发重复页终止
+        // 每页返回满页（20 条）且与上一页完全相同 → 触发重复页终止
+        const data = Array.from({ length: 20 }, () => sampleItem);
         return {
           code: 0,
           msg: 'ok',
-          data: [sampleItem],
-          meta: { current_page: page, last_page: 10, per_page: 50, total: 500 },
+          data,
+          meta: { current_page: page, last_page: 10, per_page: 20, total: 500 },
         };
       },
     });
@@ -167,6 +173,29 @@ describe('EchoTikAdapter.fetchRankingPage', () => {
     expect(result.entries).toHaveLength(5);
     expect(result.entries[0]?.rank_position).toBe(1);
     expect(result.entries[4]?.rank_position).toBe(5);
+  }, 15000);
+
+  it('单页数据不足 perPage 时不再请求下一页', async () => {
+    let calls = 0;
+    const adapter = createEchoTikAdapter({
+      async request() {
+        calls += 1;
+        const data = Array.from({ length: 5 }, (_, i) => ({
+          ...sampleItem,
+          product_id: `${i}732052189676081387`,
+        }));
+        return {
+          code: 0,
+          msg: 'ok',
+          data,
+          meta: { current_page: 1, last_page: 10, per_page: 20, total: 200 },
+        };
+      },
+    });
+    const result = await adapter.fetchAllRankings({ ...query, perPage: 20, limit: 100 });
+    expect(result.reason).toBe('NO_MORE_PAGES');
+    expect(result.entries).toHaveLength(5);
+    expect(calls).toBe(1);
   }, 15000);
 
   it('fetchAllRankings 翻页遇会员权限限制时保留已抓数据并正常结束', async () => {

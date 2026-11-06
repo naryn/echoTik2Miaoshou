@@ -34,6 +34,11 @@ def not_found(resource: str = "资源") -> ApiError:
     return ApiError("NOT_FOUND", f"{resource}不存在", http_status=404, retryable=False)
 
 
+def admin_forbidden(message: str = "当前认证 Token 不具备管理员权限") -> ApiError:
+    """构造管理端 403 错误（Token 缺失/无效/角色不是 ADMIN）。"""
+    return ApiError("ADMIN_FORBIDDEN", message, http_status=403, retryable=False)
+
+
 def conflict(code: str, message: str, retryable: bool = False) -> ApiError:
     """构造 409 状态冲突错误。"""
     return ApiError(code, message, http_status=409, retryable=retryable)

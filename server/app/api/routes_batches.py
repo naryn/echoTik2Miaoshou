@@ -42,6 +42,7 @@ def create_batch(
         client_id=client.client_id,
         idempotency_key=body.idempotency_key,
         snapshot_id=body.snapshot_id,
+        source_platform=body.source_platform,
         product_ids=body.product_ids,
         exclude_already_successful=body.exclude_already_successful,
         config=config,

@@ -248,9 +248,9 @@ export default defineContentScript({
       <span class="etm-tip">定位工作页</span>
     </button>
   </div>
-  <button class="etm-btn" aria-label="EchoTik 采集助手：待机">
+  <button class="etm-btn" aria-label="TK 采集助手：待机">
     <span class="etm-ring"></span>
-    <span class="etm-label">ET</span>
+    <span class="etm-label">TK</span>
     <span class="etm-badge"></span>
   </button>
   <div class="etm-toast" aria-live="polite"></div>
@@ -589,8 +589,8 @@ export default defineContentScript({
       const pct = total > 0 ? Math.round((done / total) * 100) : 0;
       ringEl?.style.setProperty('--p', `${pct}%`);
       // 中心显示 done/total，直观呈现采集进度
-      if (labelEl) labelEl.textContent = total > 0 ? `${done}/${total}` : 'ET';
-      btnEl.setAttribute('aria-label', `EchoTik 采集助手：${statusText}，进度 ${done}/${total || '?'}`);
+      if (labelEl) labelEl.textContent = total > 0 ? `${done}/${total}` : 'TK';
+      btnEl.setAttribute('aria-label', `TK 采集助手：${statusText}，进度 ${done}/${total || '?'}`);
 
       const badge = badgeEl!;
       badge.className = 'etm-badge';

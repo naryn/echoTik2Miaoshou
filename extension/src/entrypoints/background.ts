@@ -10,8 +10,6 @@
 import { browser } from 'wxt/browser';
 import { defineBackground } from 'wxt/utils/define-background';
 import {
-  idbGetAll,
-  idbPut,
   loadClientIdentity,
   outboxAck,
   outboxEnqueue,
@@ -20,11 +18,13 @@ import {
   storageGet,
   storageGetMany,
   storageSet,
-  type LocalProductRecord,
   type OutboxEvent,
 } from '@/modules/storage';
 import { createApiClient, ApiError, type ApiClient } from '@/modules/api/client';
 import { createEchoTikAdapter, type EchoTikTransport } from '@/modules/echotik/adapter';
+import { createFastMossAdapter, type FastMossTransport, type CapturedApiCall } from '@/modules/fastmoss/adapter';
+import { createRankingAdapter, resolveSource, type RankingTransports } from '@/modules/ranking/registry';
+import { RANKING_SOURCE_META, sourceMeta } from '@/modules/ranking/sources';
 import { ensureSingleTikTokTab, clearWorkerTabIfMatches, resolveDetailUrl } from '@/modules/tiktok/tab-manager';
 import { dlog, clearDebugLogs, readDebugLogs } from '@/modules/debug/log';
 import {
@@ -38,10 +38,12 @@ import { sendMsg, wrapHandler } from '@/shared/messaging';
 import type { MessageMap } from '@/shared/types/messages';
 import {
   ERROR_CODES,
+  type AuthMe,
   type CategoryNode,
   type ProductItem,
   type ProductRankingEntry,
   type RankingQuery,
+  type RankingSource,
   type RunnerCheckpoint,
   type RuntimePublicState,
   type TaskStatus,
@@ -49,6 +51,32 @@ import {
 
 const EXT_VERSION = '0.1.0';
 const ALARM_TICK = 'echotik-tick';
+
+/** 按运行浏览器的本地日历获取昨日，日榜只请求已完整结算的日期。 */
+function yesterdayDate(): string {
+  const date = new Date();
+  date.setDate(date.getDate() - 1);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+/**
+ * 批量执行预设时，日榜日期始终滚动到昨日。
+ * 预设保存的是筛选配置而非历史日期，避免旧预设在每天运行时仍请求保存当日的未结算榜单。
+ */
+function withYesterdayForDailyPreset(query: RankingQuery): RankingQuery {
+  const periodType = query.period?.type ?? query.rankingType;
+  if (periodType !== 'daily') return query;
+  const date = yesterdayDate();
+  return {
+    ...query,
+    period: { ...query.period, type: 'daily', startDate: date },
+    // 兼容仍读取旧字段的适配器与历史预设。
+    periodStart: date.replaceAll('-', ''),
+    periodEnd: date.replaceAll('-', ''),
+  };
+}
 
 export default defineBackground(() => {
   // ---------------- 顶层同步注册所有监听器（MV3 硬性要求） ----------------
@@ -73,15 +101,15 @@ export default defineBackground(() => {
     return true; // 异步响应
   });
   // 注意：manifest 中 action 绑定 popup（Chrome 不允许 default_popup 与
-  // openPanelOnActionClick 并存），Side Panel 经 popup 内"打开管理台"按钮打开
+  // openPanelOnActionClick 并存），管理台经 popup 内"打开管理台"按钮以独立窗口打开
 
   // 周期 alarm：reconcile + outbox 同步（周期 1 分钟，≥ 0.5 分钟约束）
   void browser.alarms.create(ALARM_TICK, { periodInMinutes: 1 });
 
-  // ---------------- 客户端注册 ----------------
+  // ---------------- 认证 Token ----------------
 
   /**
-   * 安装/更新处理：生成 install_id、注册远程客户端
+   * 安装/更新处理：生成 install_id，并尝试用已填写的 auth token 绑定账号身份
    * @param reason onInstalled 原因
    */
   async function handleInstalled(reason: string): Promise<void> {
@@ -91,31 +119,52 @@ export default defineBackground(() => {
       installId = crypto.randomUUID();
       await storageSet('install_id', installId);
     }
-    const identity = await loadClientIdentity();
-    if (!identity.client_id || !identity.client_token) {
-      await registerClient().catch(() => {
-        // 注册失败进入未注册态，等待 alarm/UI 触发重试
-      });
-    }
+    await refreshAuthIdentity().catch(() => null);
     if (reason === 'install') {
       await browser.tabs.create({ url: 'https://echotik.live/' }).catch(() => undefined);
     }
   }
 
   /**
-   * 调用远程 register 换取 client_id/token 并持久化
+   * 用当前 auth token 请求 /v1/auth/me，并把账号共享的 client_id/角色写入本地
+   * @throws ApiError token 无效或网络失败时抛出
    */
-  async function registerClient(): Promise<void> {
-    const identity = await loadClientIdentity();
-    if (!identity.install_id) throw new Error('install_id 缺失');
-    const api = getApi();
-    const res = await api.register(identity.install_id, `Chrome 客户端 ${identity.install_id.slice(0, 8)}`, EXT_VERSION);
+  async function fetchAuthIdentity(): Promise<AuthMe> {
+    const me = await getApi().authMe();
     await saveClientIdentity({
-      client_id: res.client_id,
-      client_token: res.client_token,
-      registered_at: new Date().toISOString(),
+      client_id: me.client_id,
+      client_token: null,
+      registered_at: me.registered_at ?? new Date().toISOString(),
     });
-    await broadcastState();
+    await storageSet('identity_role', me.role === 'ADMIN' ? 'ADMIN' : 'USER');
+    await storageSet('identity_display_name', me.display_name ?? null);
+    return me;
+  }
+
+  /**
+   * 刷新认证身份：未填写 token 或 token 无效时清空身份绑定（保留 token 供设置页修正）
+   */
+  async function refreshAuthIdentity(): Promise<AuthMe | null> {
+    const token = await storageGet('auth_token');
+    if (!token) {
+      await clearClientBinding();
+      return null;
+    }
+    try {
+      return await fetchAuthIdentity();
+    } catch {
+      await clearClientBinding();
+      return null;
+    }
+  }
+
+  /**
+   * 清空本地身份绑定（client_id/token/角色/显示名），不删除 auth token 本身
+   */
+  async function clearClientBinding(): Promise<void> {
+    await saveClientIdentity({ client_id: null, client_token: null, registered_at: null });
+    await storageSet('identity_role', null);
+    await storageSet('identity_display_name', null);
   }
 
   // ---------------- API 客户端 ----------------
@@ -132,6 +181,8 @@ export default defineBackground(() => {
         const s = await storageGetMany(['client_id', 'client_token']);
         return { client_id: s.client_id, client_token: s.client_token };
       },
+      // 插件设置填写的认证 Token：所有请求以 Bearer 发送
+      getAuthToken: () => storageGet('auth_token'),
     }));
   }
 
@@ -321,8 +372,16 @@ export default defineBackground(() => {
         }
         case 'PAGE_READY': {
           const cp2 = await loadCheckpoint();
-          if (!cp2.worker_tab_id) return;
+          if (!cp2.worker_tab_id) {
+            await dlog('background', 'PAGE_READY：未找到工作 Tab', { task: cp2.active_task_id });
+            return;
+          }
+          await dlog('background', 'PAGE_READY：开始检测妙手按钮', {
+            productId: cp2.product?.external_product_id,
+            tabId: cp2.worker_tab_id,
+          });
           const miaoshou = await sendMsg('tiktok.detectMiaoshou', undefined, cp2.worker_tab_id);
+          await dlog('background', 'PAGE_READY：妙手按钮检测结果', miaoshou);
           if (!miaoshou.available) {
             await finishTask('FAILED', { evidence: miaoshou.evidence, error_code: ERROR_CODES.MIAOSHOU_UNAVAILABLE });
             return;
@@ -332,14 +391,25 @@ export default defineBackground(() => {
             transition(currentSm, 'SUBMITTING', miaoshou.evidence);
             // 提交前写 SUBMITTING 检查点（规范 §5.3）
             await saveCheckpoint({ ...(await loadCheckpoint()), runner_stage: 'SUBMITTING' });
+            await dlog('background', 'PAGE_READY：进入 SUBMITTING，准备点击采集按钮');
             await advanceRunner('submitting');
+          } else {
+            await dlog('background', 'PAGE_READY：状态机不同步，未进入提交', { currentState: currentSm.status });
           }
           break;
         }
         case 'SUBMITTING': {
           const cp2 = await loadCheckpoint();
-          if (!cp2.worker_tab_id) return;
+          if (!cp2.worker_tab_id) {
+            await dlog('background', 'SUBMITTING：未找到工作 Tab', { task: cp2.active_task_id });
+            return;
+          }
+          await dlog('background', 'SUBMITTING：调用妙手按钮点击', {
+            productId: cp2.product?.external_product_id,
+            tabId: cp2.worker_tab_id,
+          });
           const submission = await sendMsg('tiktok.submitCollect', undefined, cp2.worker_tab_id);
+          await dlog('background', 'SUBMITTING：妙手点击结果', submission);
           if (!submission.submitted) {
             // 无提交证据：先核对 ERP（当前无授权途径 → UNKNOWN）
             const verify = await sendMsg(
@@ -438,8 +508,13 @@ export default defineBackground(() => {
         await stopForRegionUnavailable(probe.evidence);
       }
       // LOADING：等待 content script 的 pageReady/challenge 事件推进
-    } catch {
+    } catch (e) {
       // content script 尚未注入：等 tabs.onUpdated/reconcile 兜底
+      await dlog('background', 'TikTok 页面探测失败', {
+        productId: expectedProductId,
+        tabId,
+        error: (e as Error)?.message ?? String(e),
+      });
     }
   }
 
@@ -593,10 +668,12 @@ export default defineBackground(() => {
    * 周期任务：outbox 补传（优先级：结果>进度>榜单）→ reconcile → 心跳
    */
   async function handleTick(): Promise<void> {
+    const authToken = await storageGet('auth_token');
+    if (!authToken) return; // 未授权：不轮询、不执行任何远程操作
     const identity = await loadClientIdentity();
     if (!identity.client_id) {
-      await registerClient().catch(() => undefined);
-      return;
+      await refreshAuthIdentity().catch(() => null);
+      if (!(await storageGet('client_id'))) return; // token 无效：等待设置页修正
     }
     await syncOutbox();
     await reconcile('alarm');
@@ -639,6 +716,7 @@ export default defineBackground(() => {
 
   let rankingProgress = { running: false, fetched: 0, limit: 0, page: 0, done: false, reason: '' };
   let rankingCancelled = false;
+  let presetBatchProgress = { running: false, current: 0, total: 0, completed: 0, failed: 0 };
 
   /**
    * 执行榜单抓取：EchoTik 分页 → 远程快照（部分上传失败保留 PARTIAL）
@@ -647,8 +725,8 @@ export default defineBackground(() => {
   async function runRankingCollect(query: RankingQuery): Promise<void> {
     rankingCancelled = false;
     rankingProgress = { running: true, fetched: 0, limit: query.limit, page: 0, done: false, reason: '' };
-    const transport = createEchoTikTransport();
-    const adapter = createEchoTikAdapter(transport);
+    const source = resolveSource(query);
+    const adapter = createRankingAdapter(source, createRankingTransports());
     const identity = await loadClientIdentity();
     if (!identity.client_id) throw new Error(ERROR_CODES.NOT_REGISTERED);
 
@@ -685,7 +763,6 @@ export default defineBackground(() => {
           break;
         }
       }
-      await persistLocalProducts(entries, query, snapshot.snapshot_id);
     } catch (e) {
       // 快照已创建：后续抓取/上传异常时标记 FAILED，避免历史快照长期停留在 CAPTURING
       await getApi().finishSnapshot(snapshot.snapshot_id, 'FAILED', 0).catch(() => undefined);
@@ -731,145 +808,12 @@ export default defineBackground(() => {
   }
 
   /**
-   * 将本次采集结果写入本地 IndexedDB（商品列表页的唯一数据源）
-   * 以 `region:external_product_id` 为键，重复采集时更新为最新一次观测
-   * @param entries 归一化后的采集条目
-   * @param query 本次采集条件
-   * @param snapshotId 远端快照 ID（仅用于溯源展示）
-   */
-  async function persistLocalProducts(
-    entries: ProductRankingEntry[],
-    query: RankingQuery,
-    snapshotId: string,
-  ): Promise<void> {
-    if (!entries.length) return;
-    const collectedAt = new Date().toISOString();
-    const records: LocalProductRecord[] = entries.map((e) => ({
-      id: `${e.region}:${e.external_product_id}`,
-      platform: 'TIKTOK',
-      region: e.region,
-      external_product_id: e.external_product_id,
-      title: e.title ?? null,
-      shop_id: e.shop?.id ?? null,
-      shop_name: e.shop?.name ?? null,
-      rank_position: e.rank_position ?? null,
-      sales_value: e.sales?.value ?? null,
-      gmv_value: e.gmv?.value ?? null,
-      image_url: e.image_url ?? null,
-      category: e.category ?? null,
-      detail_url: e.detail_url ?? `https://www.tiktok.com/shop/pdp/${e.external_product_id}`,
-      snapshot_id: snapshotId,
-      ranking_variant: String(query.rankingVariant ?? 'top-sold'),
-      ranking_type: String(query.rankingType),
-      period_start: query.periodStart ?? null,
-      collected_at: collectedAt,
-    }));
-    await Promise.all(records.map((r) => idbPut('local_products', r)));
-  }
-
-  /**
    * 判断缓存的类目树是否为英文（老版本缓存需刷新为中文）
    * @param items 类目树
    */
   function isEnglishCategoryTree(items: CategoryNode[]): boolean {
     const sample = (items.find((i) => i.value)?.label ?? '').trim();
     return /[A-Za-z]/.test(sample);
-  }
-
-  /**
-   * 构建「类目英文名 / slug / ID → 中文 label」映射，用于把远端英文类目显示为中文
-   * 同时返回「类目 label → 后代类目 label 集合」，用于选中一级/二级分类时匹配其下商品
-   * 数据来自本地缓存的 EchoTik 类目树（product-category 接口）
-   */
-  async function buildCategoryIndex(): Promise<{
-    labelMap: Map<string, string>;
-    descendants: Map<string, Set<string>>;
-  }> {
-    const cache = await storageGet('category_cache');
-    const labelMap = new Map<string, string>();
-    const descendants = new Map<string, Set<string>>();
-
-    /** 收集节点及其所有后代的 label（小写） */
-    const collectLabels = (nodes: CategoryNode[], into: Set<string>): void => {
-      for (const n of nodes) {
-        const l = (n.label ?? '').trim().toLowerCase();
-        if (l) into.add(l);
-        if (n.children?.length) collectLabels(n.children, into);
-      }
-    };
-
-    const walk = (nodes: CategoryNode[]): void => {
-      for (const n of nodes) {
-        const label = (n.label ?? '').trim();
-        if (label) {
-          labelMap.set(label.toLowerCase(), label);
-          if (n.name_slug) labelMap.set(n.name_slug.toLowerCase(), label);
-          if (n.value) labelMap.set(String(n.value).toLowerCase(), label);
-          if (n.children?.length) {
-            const set = new Set<string>();
-            collectLabels(n.children, set);
-            descendants.set(label.toLowerCase(), set);
-          }
-        }
-        if (n.children?.length) walk(n.children);
-      }
-    };
-    walk(cache?.items ?? []);
-
-    // 英文类目树：把旧记录中的英文类目名映射为中文（失败时忽略）
-    const enCache = await storageGet('category_cache_en');
-    let enItems: CategoryNode[] | null = enCache?.items ?? null;
-    if (!enItems && cache?.items?.length) {
-      try {
-        const adapter = createEchoTikAdapter(createEchoTikTransport());
-        enItems = await adapter.fetchCategories('en');
-        await storageSet('category_cache_en', { items: enItems, fetched_at: new Date().toISOString() });
-      } catch {
-        enItems = null;
-      }
-    }
-    if (enItems?.length) {
-      /** value → 中文 label */
-      const byValue = new Map<string, string>();
-      const collectValue = (nodes: CategoryNode[]): void => {
-        for (const n of nodes) {
-          const label = (n.label ?? '').trim();
-          if (label && n.value) byValue.set(String(n.value), label);
-          if (n.children?.length) collectValue(n.children);
-        }
-      };
-      collectValue(cache?.items ?? []);
-      /** 英文 label（小写）→ 中文 label */
-      const collectEn = (nodes: CategoryNode[]): void => {
-        for (const n of nodes) {
-          const zh = n.value ? byValue.get(String(n.value)) : undefined;
-          const en = (n.label ?? '').trim().toLowerCase();
-          if (zh && en) labelMap.set(en, zh);
-          if (n.children?.length) collectEn(n.children);
-        }
-      };
-      collectEn(enItems);
-    }
-    return { labelMap, descendants };
-  }
-
-  /**
-   * 查询批次内所有任务涉及的商品外部 ID（商品列表按批次过滤用）
-   * 注意：只读取批次任务，不读取远端商品列表
-   * @param batchId 批次 ID
-   */
-  async function batchExternalProductIds(batchId: string): Promise<Set<string>> {
-    const api = getApi();
-    const out = new Set<string>();
-    for (let page = 1; page <= 10; page++) {
-      const r = await api.listBatchTasks(batchId, { page, per_page: 100 });
-      for (const t of r.items) {
-        const ext = t.product?.external_product_id;
-        if (ext) out.add(ext);
-      }
-      if (page * r.per_page >= r.total) break;
-    }
-    return out;
   }
 
   /**
@@ -926,6 +870,10 @@ export default defineBackground(() => {
       // 手动测试需要真正执行一次，跳过去重
       recollect: true,
     });
+    await dlog('background', '单商品采集：已创建 ERP 批次', {
+      batchId: batch.batch_id,
+      productId: externalProductId,
+    });
     await api.batchAction(batch.batch_id, 'start', { client_id: await storageGet('client_id') });
     await saveCheckpoint({
       ...(await loadCheckpoint()),
@@ -933,94 +881,10 @@ export default defineBackground(() => {
       paused: false,
       runner_stage: 'IDLE',
     });
+    await dlog('background', '单商品采集：开始领取任务', { batchId: batch.batch_id, productId: externalProductId });
     await claimAndStart(batch.batch_id);
     await broadcastState();
     return { batch_id: batch.batch_id, closed_batch_ids: closed.length ? closed : undefined };
-  }
-
-  /**
-   * 本地商品分页查询（筛选/排序全部在本地完成，不访问远端商品列表）
-   * @param payload 查询条件（batch_id 时先取该批次任务商品外部 ID 做交集）
-   */
-  async function listLocalProducts(payload: {
-    keyword?: string;
-    region?: string;
-    category?: string;
-    ranking_variant?: string;
-    date_from?: string;
-    date_to?: string;
-    rank_min?: number;
-    rank_max?: number;
-    batch_id?: string;
-    sort?: string;
-    order?: 'asc' | 'desc';
-    page?: number;
-    per_page?: number;
-  }): Promise<{ items: ProductItem[]; total: number; page: number; per_page: number }> {
-    const all = await idbGetAll<LocalProductRecord>('local_products');
-    const { labelMap, descendants } = await buildCategoryIndex();
-    const kw = (payload.keyword ?? '').trim().toLowerCase();
-    const from = payload.date_from ? new Date(payload.date_from).getTime() : null;
-    const to = payload.date_to ? new Date(payload.date_to).getTime() : null;
-    // 批次过滤：仅保留该批次任务涉及的商品（远端任务列表，非商品列表）
-    const batchExtIds = payload.batch_id ? await batchExternalProductIds(payload.batch_id) : null;
-
-    /** 分类值统一转为中文 label（已是中文则原样保留） */
-    const toZh = (raw: string | null): string | null =>
-      raw ? (labelMap.get(raw.toLowerCase()) ?? raw) : null;
-
-    const filtered = all.filter((r) => {
-      if (kw) {
-        const hay = `${r.title ?? ''} ${r.external_product_id} ${r.shop_name ?? ''}`.toLowerCase();
-        if (!hay.includes(kw)) return false;
-      }
-      if (payload.region && r.region !== payload.region) return false;
-      if (batchExtIds && !batchExtIds.has(r.external_product_id)) return false;
-      if (payload.category) {
-        const sel = payload.category.toLowerCase();
-        const cat = (r.category ?? '').toLowerCase();
-        const sub = descendants.get(sel);
-        // 选中一级/二级分类时匹配其下所有后代；选中叶子或未知分类时精确匹配
-        if (sub && sub.size) {
-          if (!sub.has(cat)) return false;
-        } else if (cat !== sel) return false;
-      }
-      if (payload.ranking_variant && r.ranking_variant !== payload.ranking_variant) return false;
-      if (payload.rank_min != null && (r.rank_position ?? 0) < payload.rank_min) return false;
-      if (payload.rank_max != null && (r.rank_position ?? 0) > payload.rank_max) return false;
-      const t = new Date(r.collected_at).getTime();
-      if (from != null && t < from) return false;
-      if (to != null && t > to) return false;
-      return true;
-    });
-
-    const dir = payload.order === 'asc' ? 1 : -1;
-    const sort = payload.sort ?? 'collected_at';
-    filtered.sort((a, b) => {
-      if (sort === 'rank_position') return ((a.rank_position ?? 0) - (b.rank_position ?? 0)) * dir;
-      if (sort === 'title') return (a.title ?? '').localeCompare(b.title ?? '') * dir;
-      return (new Date(a.collected_at).getTime() - new Date(b.collected_at).getTime()) * dir;
-    });
-
-    const page = Math.max(1, payload.page ?? 1);
-    const perPage = Math.min(100, Math.max(1, payload.per_page ?? 20));
-    const start = (page - 1) * perPage;
-    const items = filtered.slice(start, start + perPage).map((r) => ({
-      id: r.id,
-      platform: r.platform,
-      region: r.region,
-      external_product_id: r.external_product_id,
-      title: r.title,
-      shop_id: r.shop_id,
-      shop_name: r.shop_name,
-      image_url: r.image_url,
-      detail_url: r.detail_url,
-      first_seen_at: r.collected_at,
-      last_seen_at: r.collected_at,
-      raw_excerpt: { category: toZh(r.category), rank_position: r.rank_position },
-      erp_status: 'NEVER',
-    }));
-    return { items, total: filtered.length, page, per_page: perPage };
   }
 
   /**
@@ -1126,6 +990,92 @@ export default defineBackground(() => {
     };
   }
 
+  /**
+   * 创建 FastMoss 传输层：定位 fastmoss.com Tab 并桥接 content script
+   */
+  function createFastMossTransport(): FastMossTransport {
+    return {
+      async request(payload) {
+        const tab = await findRankingTab('FASTMOSS');
+        if (!tab?.id) {
+          throw Object.assign(new Error('未找到 FastMoss 页面，请先打开 https://www.fastmoss.com/e-commerce/saleslist'), {
+            code: ERROR_CODES.RANKING_SOURCE_OFFLINE,
+          });
+        }
+        return sendToFastMossTab(tab.id, payload);
+      },
+      async readCapturedCalls() {
+        const tab = await findRankingTab('FASTMOSS');
+        if (!tab?.id) return [] as CapturedApiCall[];
+        return sendMsg('fastmoss.readCapturedCalls', undefined, tab.id)
+          .then((r) => r.calls as CapturedApiCall[])
+          .catch(() => [] as CapturedApiCall[]);
+      },
+      async readPageSelection() {
+        const tab = await findRankingTab('FASTMOSS');
+        if (!tab?.id) return {};
+        return sendMsg('fastmoss.readPageSelection', undefined, tab.id).catch(() => ({}) as Partial<RankingQuery>);
+      },
+    };
+  }
+
+  /**
+   * 组装各来源平台传输层（注册表按 source 取用）
+   */
+  function createRankingTransports(): RankingTransports {
+    return { echotik: createEchoTikTransport(), fastmoss: createFastMossTransport() };
+  }
+
+  /**
+   * 向 FastMoss 页面发送消息；content script 未就绪时刷新页面后重试
+   * @param tabId 标签页
+   * @param payload 请求体
+   */
+  async function sendToFastMossTab(
+    tabId: number,
+    payload: { path: string; params?: Record<string, string | number>; method?: 'GET' | 'POST'; body?: unknown },
+  ): Promise<unknown> {
+    try {
+      return await sendMsg('fastmoss.fetchApi', payload, tabId);
+    } catch (e) {
+      if (!isMissingReceiver(e)) throw e;
+      await browser.tabs.reload(tabId);
+      await waitTabLoaded(tabId);
+      let lastError: unknown = e;
+      for (let i = 0; i < 6; i++) {
+        try {
+          return await sendMsg('fastmoss.fetchApi', payload, tabId);
+        } catch (err) {
+          lastError = err;
+          if (!isMissingReceiver(err)) throw err;
+          await new Promise((r) => setTimeout(r, 600));
+        }
+      }
+      throw lastError;
+    }
+  }
+
+  /**
+   * 查找指定来源平台的标签页（元信息来自 modules/ranking/sources.ts）
+   * 打分：主域 +10，榜单页 +5，保证优先选到带登录态、且已经加载榜单数据的页面
+   * @param source 来源平台
+   */
+  async function findRankingTab(source: RankingSource): Promise<{ id?: number; url?: string } | null> {
+    const meta = sourceMeta(source);
+    const tabs = await browser.tabs.query({ url: meta.tabUrlPatterns });
+    const candidates = tabs.filter((t) => t.id != null);
+    const score = (t: { url?: string }): number => {
+      const u = t.url ?? '';
+      let s = 0;
+      if (u.startsWith(meta.origin)) s += 10;
+      // 榜单/商品列表路径（EchoTik: board/products；FastMoss: saleslist/hotlist/newProducts/search）
+      if (/\/(board|rank|ranking|products|saleslist|hotlist|newProducts|search)([/?#]|$)/i.test(u)) s += 5;
+      return s;
+    };
+    candidates.sort((a, b) => score(b) - score(a));
+    return candidates[0] ?? null;
+  }
+
   // ---------------- 消息路由 ----------------
 
   /**
@@ -1145,12 +1095,33 @@ export default defineBackground(() => {
     > = {
       ping: wrapHandler<'ping'>(async () => ({ pong: true as const, ts: new Date().toISOString() })),
       'client.getState': wrapHandler<'client.getState'>(async () => buildPublicState()),
-      'client.register': wrapHandler<'client.register'>(async (payload) => {
-        if (payload?.server_url) {
-          await storageSet('server_url', payload.server_url);
+      // ---- 认证 Token（插件设置填写，Bearer 认证）----
+      'auth.me': wrapHandler<'auth.me'>(async () => {
+        const token = await storageGet('auth_token');
+        if (!token) throw new ApiError(ERROR_CODES.SERVER_UNAUTHORIZED, '请先在设置页填写认证 Token');
+        return fetchAuthIdentity();
+      }),
+      'auth.setToken': wrapHandler<'auth.setToken'>(async (payload) => {
+        const token = (payload?.token ?? '').trim();
+        if (!token) throw new Error('认证 Token 不能为空');
+        await storageSet('auth_token', token);
+        await clearClientBinding();
+        try {
+          const me = await fetchAuthIdentity();
+          await broadcastState();
+          return me;
+        } catch (e) {
+          // 无效 token 不保留，避免界面处于无法自证的授权态
+          await storageSet('auth_token', null);
+          await broadcastState();
+          throw e;
         }
-        await registerClient();
-        return { client_id: (await storageGet('client_id')) ?? '' };
+      }),
+      'auth.clear': wrapHandler<'auth.clear'>(async () => {
+        await storageSet('auth_token', null);
+        await clearClientBinding();
+        await broadcastState();
+        return { ok: true as const };
       }),
       'client.testConnection': wrapHandler<'client.testConnection'>(async () => {
         const t0 = Date.now();
@@ -1194,6 +1165,28 @@ export default defineBackground(() => {
         });
         return { snapshot_local_id: crypto.randomUUID() };
       }),
+      'ranking.runPresetBatch': wrapHandler<'ranking.runPresetBatch'>(async (payload) => {
+        if (presetBatchProgress.running || rankingProgress.running) throw new Error('已有榜单采集正在执行');
+        if (!payload.queries.length) throw new Error('请至少选择一个筛选预设');
+        presetBatchProgress = { running: true, current: 0, total: payload.queries.length, completed: 0, failed: 0 };
+        void (async () => {
+          for (let i = 0; i < payload.queries.length; i++) {
+            presetBatchProgress = { ...presetBatchProgress, current: i + 1 };
+            try {
+              await runRankingCollect(withYesterdayForDailyPreset(payload.queries[i]!));
+              presetBatchProgress = { ...presetBatchProgress, completed: presetBatchProgress.completed + 1 };
+            } catch {
+              presetBatchProgress = { ...presetBatchProgress, failed: presetBatchProgress.failed + 1 };
+            }
+          }
+          presetBatchProgress = { ...presetBatchProgress, running: false };
+        })();
+        return { started: payload.queries.length };
+      }),
+      'ranking.presetBatchProgress': wrapHandler<'ranking.presetBatchProgress'>(async () => presetBatchProgress),
+      'rankingPreset.list': wrapHandler<'rankingPreset.list'>(async () => getApi().listRankingPresets()),
+      'rankingPreset.save': wrapHandler<'rankingPreset.save'>(async (payload) => getApi().saveRankingPreset(payload.name, payload.query as unknown as Record<string, unknown>)),
+      'rankingPreset.delete': wrapHandler<'rankingPreset.delete'>(async (payload) => getApi().deleteRankingPreset(payload.preset_id)),
       'ranking.getProgress': wrapHandler<'ranking.getProgress'>(async () => rankingProgress),
       'ranking.cancelCollect': wrapHandler<'ranking.cancelCollect'>(async () => {
         rankingCancelled = true;
@@ -1201,7 +1194,8 @@ export default defineBackground(() => {
       }),
       'ranking.preview': wrapHandler<'ranking.preview'>(async (payload) => {
         // 预览：只抓首页并归一化，不创建远程快照（规范 §3.3 预览不持久化）
-        const adapter = createEchoTikAdapter(createEchoTikTransport());
+        const source = resolveSource(payload.query);
+        const adapter = createRankingAdapter(source, createRankingTransports());
         const page = await adapter.fetchRankingPage(payload.query, undefined, 1);
         const startRank = Math.max(1, payload.query.startRank || 1);
         const items = page.records
@@ -1218,20 +1212,29 @@ export default defineBackground(() => {
       // ---- 数据查询类：薄透传远程 REST（类型与错误由 api client 包装） ----
       'snapshot.list': wrapHandler<'snapshot.list'>(async (payload) => getApi().listSnapshots(payload ?? {})),
       'snapshot.createFromCurrent': wrapHandler<'snapshot.createFromCurrent'>(async (payload) => {
-        // 定位 EchoTik Tab → 读取页面筛选 → 合并覆盖项 → 复用榜单抓取流程
-        const tab = await findEchoTikTab();
+        // 按来源平台定位页面 → 读取页面筛选 → 合并覆盖项 → 复用榜单抓取流程
+        const source: RankingSource = payload?.source ?? payload?.overrides?.source ?? 'ECHOTIK';
+        const tab = await findRankingTab(source);
         if (!tab?.id) {
-          throw Object.assign(new Error('未找到 EchoTik 页面，请先打开 echotik.live 榜单页'), {
-            code: ERROR_CODES.ECHOTIK_NETWORK,
+          const meta = sourceMeta(source);
+          throw Object.assign(new Error(`未找到 ${meta.label} 页面，请先打开 ${meta.boardUrl}`), {
+            code: ERROR_CODES.RANKING_SOURCE_OFFLINE,
           });
         }
-        const selection = await sendMsg('echotik.readPageSelection', undefined, tab.id).catch(() => ({}) as Partial<RankingQuery>);
+        const selection =
+          source === 'FASTMOSS'
+            ? await sendMsg('fastmoss.readPageSelection', undefined, tab.id).catch(() => ({}) as Partial<RankingQuery>)
+            : await sendMsg('echotik.readPageSelection', undefined, tab.id).catch(() => ({}) as Partial<RankingQuery>);
         const query: RankingQuery = {
-          region: 'US',
+          source,
+          region: 'MX',
           rankingType: 'daily',
           rankingVariant: 'top-sold',
           startRank: 1,
-          limit: 200,
+          limit: 100,
+          // 渠道默认分页：EchoTik 20 条/页 × 最多 5 页；FastMoss 10 条/页 × 最多 10 页
+          perPage: source === 'FASTMOSS' ? 10 : 20,
+          maxPages: source === 'FASTMOSS' ? 10 : 5,
           ...selection,
           ...(payload?.overrides ?? {}),
         } as RankingQuery;
@@ -1240,6 +1243,16 @@ export default defineBackground(() => {
         });
         return { started: true as const };
       }),
+      'ranking.sources': wrapHandler<'ranking.sources'>(async () => ({
+        items: Object.values(RANKING_SOURCE_META).map((m) => ({
+          id: m.id,
+          label: m.label,
+          origin: m.origin,
+          boardUrl: m.boardUrl,
+          available: m.available,
+          unavailableReason: m.unavailableReason,
+        })),
+      })),
       'echotik.getCategories': wrapHandler<'echotik.getCategories'>(async (payload) => {
         // 策略：缓存长期有效（命中即用，避免每次请求大体积类目树）；force 才强制刷新
         // 英文旧缓存会自动尝试刷新为中文；刷新失败时回退到旧缓存，保证分类始终可用
@@ -1261,7 +1274,6 @@ export default defineBackground(() => {
         }
       }),
       'product.list': wrapHandler<'product.list'>(async (payload) => getApi().listProducts(payload ?? {})),
-      'product.listLocal': wrapHandler<'product.listLocal'>(async (payload) => listLocalProducts(payload ?? {})),
       'product.collectSingle': wrapHandler<'product.collectSingle'>(async (payload) =>
         collectSingleProduct(payload.external_product_id, payload.region),
       ),
@@ -1336,6 +1348,21 @@ export default defineBackground(() => {
       }),
       'attempt.list': wrapHandler<'attempt.list'>(async (payload) => getApi().listAttempts(payload ?? {})),
       'client.me': wrapHandler<'client.me'>(async () => getApi().me()),
+      // ---- 超级管理员（隐藏设置，只读）----
+      'admin.listClients': wrapHandler<'admin.listClients'>(async () => getApi().adminListClients()),
+      'admin.listBatches': wrapHandler<'admin.listBatches'>(async (payload) =>
+        getApi().adminListBatches(payload ?? {}),
+      ),
+      'admin.getBatch': wrapHandler<'admin.getBatch'>(async (payload) =>
+        getApi().adminGetBatch(payload.batch_id),
+      ),
+      'admin.batchTasks': wrapHandler<'admin.batchTasks'>(async (payload) => {
+        const { batch_id, ...params } = payload;
+        return getApi().adminListBatchTasks(batch_id, params);
+      }),
+      'admin.listProducts': wrapHandler<'admin.listProducts'>(async (payload) =>
+        getApi().adminListProducts(payload ?? {}),
+      ),
       'outbox.flush': wrapHandler<'outbox.flush'>(async () => {
         // 手动触发 outbox 补传（复用恢复流程的幂等补传逻辑）
         const before = (await outboxPending()).length;
@@ -1352,7 +1379,7 @@ export default defineBackground(() => {
         return { ok: true as const };
       }),
       'widget.openDashboard': wrapHandler<'widget.openDashboard'>(async () => {
-        await openSidePanel(sender);
+        await openManagerPage();
         return { opened: true as const };
       }),
       'widget.locateWorkerTab': wrapHandler<'widget.locateWorkerTab'>(async () => {
@@ -1365,12 +1392,53 @@ export default defineBackground(() => {
         return { focused: true };
       }),
       // content script 事件
-      'cs.contentReady': wrapHandler<'cs.contentReady'>(async () => ({ ack: true as const })),
+      'cs.contentReady': wrapHandler<'cs.contentReady'>(async (payload, sender) => {
+        // 新建/跳转 TikTok Tab 时，content script 可能早于 ensureSingleTikTokTab
+        // 写入 checkpoint 完成注入。此处立刻补探测，避免“页面已打开但一直不点击”。
+        const cp = await loadCheckpoint();
+        const tabId = (sender as { tab?: { id?: number } }).tab?.id;
+        await dlog('background', '内容脚本已就绪', {
+          site: payload.site,
+          tabId,
+          stage: cp.runner_stage,
+          productId: cp.product?.external_product_id,
+        });
+        if (
+          payload.site === 'tiktok' &&
+          tabId != null &&
+          cp.runner_stage === 'NAVIGATING' &&
+          cp.product &&
+          (cp.worker_tab_id == null || cp.worker_tab_id === tabId)
+        ) {
+          await saveCheckpoint({ ...cp, worker_tab_id: tabId });
+          await probeAndAdvance(tabId, cp.product.external_product_id);
+        }
+        return { ack: true as const };
+      }),
       'tiktok.pageReady': wrapHandler<'tiktok.pageReady'>(async (payload) => {
         const cp = await loadCheckpoint();
+        await dlog('background', '收到 TikTok 页面就绪事件', {
+          reportedProductId: payload.productId,
+          expectedProductId: cp.product?.external_product_id,
+          stage: cp.runner_stage,
+        });
         if (cp.runner_stage === 'NAVIGATING' && cp.product?.external_product_id === payload.productId) {
+          // content script 的就绪通知可能先于 probeAndAdvance 返回。
+          // 检查点与内存状态机必须同步推进，否则 PAGE_READY 阶段会因
+          // currentSm 仍停在 NAVIGATING 而跳过“检测并点击采集此商品”。
+          if (currentSm?.status === 'NAVIGATING') {
+            transition(currentSm, 'PAGE_READY', 'content-script pageReady');
+          }
+          await dlog('background', 'TikTok 页面就绪，准备检测妙手按钮', {
+            productId: payload.productId,
+            tab: cp.worker_tab_id,
+          });
           await saveCheckpoint({ ...cp, runner_stage: 'PAGE_READY' });
           await advanceRunner('cs-pageReady');
+        } else {
+          await dlog('background', '页面就绪事件未推进任务', {
+            reason: cp.runner_stage !== 'NAVIGATING' ? '当前阶段不是 NAVIGATING' : '商品 ID 不匹配',
+          });
         }
         return { ack: true as const };
       }),
@@ -1428,15 +1496,22 @@ export default defineBackground(() => {
   }
 
   /**
-   * 打开 Side Panel（widget/ popup 触发）
-   * @param sender 消息发送者
+   * 打开管理台：独立扩展页面（独立窗口），不叠加在任何网页上
+   * 若已存在管理台窗口则聚焦复用，避免重复打开
    */
-  async function openSidePanel(sender: unknown): Promise<void> {
-    const s = sender as { tab?: { windowId?: number } };
-    const windowId = s?.tab?.windowId ?? (await browser.windows.getCurrent()).id;
-    if (windowId != null) {
-      await browser.sidePanel.open({ windowId }).catch(() => undefined);
+  async function openManagerPage(): Promise<void> {
+    const url = browser.runtime.getURL('/manager.html');
+    const tabs = await browser.tabs.query({ url: `${url}*` }).catch(() => []);
+    const existing = tabs[0];
+    if (existing?.id != null) {
+      await browser.tabs.update(existing.id, { active: true });
+      if (existing.windowId != null) {
+        await browser.windows.update(existing.windowId, { focused: true });
+      }
+      return;
     }
+    // 管理台包含筛选器、快照/批次表格与日志；使用桌面工作区宽度，避免 520px 窗口挤压表格。
+    await browser.windows.create({ url, type: 'popup', width: 1080, height: 860 });
   }
 
   // ---------------- 状态广播与通知 ----------------
@@ -1490,10 +1565,15 @@ export default defineBackground(() => {
    */
   async function buildPublicState(): Promise<RuntimePublicState> {
     const identity = await loadClientIdentity();
+    const authToken = await storageGet('auth_token');
+    const roleRaw = await storageGet('identity_role');
+    const displayName = await storageGet('identity_display_name');
+    const authorized = !!authToken && !!identity.client_id;
+    const role = authorized && roleRaw ? (roleRaw === 'ADMIN' ? 'ADMIN' : 'USER') : null;
     const cp = await loadCheckpoint();
     let connected = false;
     let progress: RuntimePublicState['progress'] = null;
-    if (cp.active_batch_id) {
+    if (authorized && cp.active_batch_id) {
       const batch = await getApi().getBatch(cp.active_batch_id).catch(() => null);
       if (batch) {
         connected = true;
@@ -1501,12 +1581,15 @@ export default defineBackground(() => {
         const done = (s.success ?? 0) + (s.failed ?? 0) + (s.skipped ?? 0) + (s.unknown ?? 0);
         progress = batch.total != null ? { done, total: batch.total } : null;
       }
-    } else {
+    } else if (authorized) {
       connected = await getApi().me().then(() => true).catch(() => false);
     }
     return {
       connected,
-      registered: !!identity.client_id,
+      registered: authorized,
+      authorized,
+      role,
+      display_name: displayName ?? null,
       client_id: identity.client_id,
       active_batch_id: cp.active_batch_id,
       runner_stage: cp.runner_stage,

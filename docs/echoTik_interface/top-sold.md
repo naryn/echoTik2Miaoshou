@@ -11,8 +11,23 @@
 | time_range | string | 是 | 日期，格式 `yyyyMMdd` | `20261103` |
 | page | int | 是 | 页码，从 1 开始 | `1` |
 | per_page | int | 是 | 每页数量 | `50` |
-| product_categories | string | 否 | 商品类目过滤，取类目树接口的 `value`（类目 ID），多个用逗号分隔，为空表示全部，取值见 [product-category.md](product-category.md) | `` |
+| product_categories[] | string | 否 | 商品类目过滤。当前页面实际以数组参数传递，取类目树接口的 `value`（类目 ID）；为空表示全部，取值见 [product-category.md](product-category.md) | `600001` |
 | order | string | 否 | 排序字段，如 `sale_cnt`、`total_gmv_amt` | `sale_cnt` |
+
+## 页面请求必需 Header（2026-11-06 实测）
+
+仅携带 Cookie 的同源请求会被服务端返回 HTTP 200 的会员 HTML 页。页面翻页实际还带有以下身份与区域 Header：
+
+| Header | 来源 | 示例/说明 |
+| --- | --- | --- |
+| `Authorization` | 页面 `localStorage.token` | `Bearer <token>` |
+| `X-User-Id` | 页面 `localStorage.userInfo.user_id` | 当前登录用户 ID |
+| `x-region` | 当前页面所选站点 | `MX` |
+| `x-currency` | 当前页面所选币种 | `MXN` |
+| `x-secondary-currency` | 页面默认辅助币种 | `CNY` |
+| `x-lang` | 页面语言 | `zh-CN` |
+
+扩展应在 EchoTik 页的 MAIN world 中读取并仅用于同源请求，不能将 token 回传或写入扩展存储。
 
 ## 响应结构
 

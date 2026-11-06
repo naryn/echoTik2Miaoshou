@@ -1,5 +1,5 @@
 /**
- * Side Panel 全局状态 store（简单 reactive 实现，无 pinia）
+ * 管理台全局状态 store（简单 reactive 实现，无 pinia）
  * - 与 background 的消息 client（Promise 化封装 + 状态订阅）
  * - 刷新/关闭侧栏不影响批次运行（权威状态在 background/远程）
  * - 筛选预设 CRUD 与执行/行为配置（chrome.storage.local）
@@ -21,12 +21,22 @@ export const store = reactive({
   state: null as RuntimePublicState | null,
   loading: true,
   error: null as string | null,
+  /** 插件设置中填写的认证 Token（Bearer；为空时整个插件不可用） */
+  authToken: null as string | null,
 });
 
 /**
  * 初始化 store：拉取一次状态 + 订阅 background 广播（runtime.state.push）
  */
 export async function initStore(): Promise<void> {
+  // 认证 Token 与运行时状态并行读取
+  storageGet('auth_token')
+    .then((token) => {
+      store.authToken = token;
+    })
+    .catch(() => {
+      store.authToken = null;
+    });
   try {
     store.state = await sendMsg('client.getState', undefined);
     store.error = null;
@@ -40,6 +50,27 @@ export async function initStore(): Promise<void> {
       store.state = msg.payload;
     }
   });
+}
+
+/**
+ * 保存并验证认证 Token（成功后切换账号身份并刷新状态）
+ * @param token 服务端 auth_users 表中的 token
+ */
+export async function setAuthToken(token: string): Promise<void> {
+  const me = await sendMsg('auth.setToken', { token: token.trim() });
+  store.authToken = token.trim();
+  // auth.setToken 内部已广播，这里再主动拉一次确保侧栏立即更新
+  await refreshState();
+  store.error = me ? null : store.error;
+}
+
+/**
+ * 清除认证 Token（退出授权，插件回到不可用状态）
+ */
+export async function clearAuthToken(): Promise<void> {
+  await sendMsg('auth.clear', undefined);
+  store.authToken = null;
+  await refreshState();
 }
 
 /**

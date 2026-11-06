@@ -6,10 +6,10 @@
  *   结果过滤、单任务侧滑抽屉、采集尝试时间线
  * - 运行前检查（登录态/TikTok Tab/妙手/远程），不通过时显示具体错误与"重新检测"
  */
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { sendMsg } from '@/shared/messaging';
-import type { AttemptItem, BatchItem, Paginated, TaskItem } from '@/shared/types';
+import type { AttemptItem, BatchItem, ClientMe, Paginated, TaskItem } from '@/shared/types';
 import { BATCH_STATUSES } from '@/shared/types';
 import type { MessageMap } from '@/shared/types/messages';
 import { refreshState, store } from '../store';
@@ -26,12 +26,34 @@ const router = useRouter();
  */
 function viewBatchProducts(b: BatchItem): void {
   const query: Record<string, string> = { batch_id: b.batch_id };
+  if (b.snapshot?.snapshot_id) query.snapshot_id = b.snapshot.snapshot_id;
   if (b.snapshot?.region) query.region = b.snapshot.region;
   if (b.snapshot?.ranking_variant) query.variant = b.snapshot.ranking_variant;
+  const source = b.source_platform ?? b.snapshot?.source_platform;
+  if (source) query.source_platform = source;
   router.push({ path: '/products', query });
 }
 
+/** 来源平台选项（来自 background 注册表，便于后续扩展） */
+const sources = ref<{ id: string; label: string }[]>([]);
+
+/**
+ * 来源平台展示名（缺省视为 EchoTik）
+ * @param p 平台标识
+ */
+function sourceLabel(p?: string | null): string {
+  const id = p ?? 'ECHOTIK';
+  return sources.value.find((s) => s.id === id)?.label ?? id;
+}
+
 // ---------------- 批次列表 ----------------
+
+/** 是否管理员角色（auth_users.role=ADMIN 时读取全部账号数据，只读） */
+const isAdmin = computed(() => store.state?.role === 'ADMIN');
+/** 管理员：全量客户端（用于归属筛选与展示） */
+const adminClients = ref<ClientMe[]>([]);
+/** 管理员：客户端筛选 */
+const adminClientFilter = ref('');
 
 /** 列表筛选 */
 const listFilter = ref({ status: '', date_from: '', date_to: '', region: '' });
@@ -71,19 +93,49 @@ const visibleBatches = computed(() => {
 });
 
 /**
+ * 客户端展示名（管理员跨客户端视图使用，缺失时回退到 client_id 前 8 位）
+ * @param id 客户端 ID
+ */
+function clientLabel(id?: string | null): string {
+  if (!id) return '—';
+  const hit = adminClients.value.find((c) => c.client_id === id);
+  return hit?.display_name || id.slice(0, 8);
+}
+
+/**
+ * 加载管理员可见的全量客户端列表（仅管理员模式）
+ */
+async function loadAdminClients(): Promise<void> {
+  if (!isAdmin.value) return;
+  try {
+    const r = await sendMsg('admin.listClients', undefined);
+    adminClients.value = r.items;
+  } catch {
+    adminClients.value = [];
+  }
+}
+
+/**
  * 加载批次列表
+ * 普通模式：仅本客户端批次；管理员模式：远端全量批次（可按客户端筛选）
  */
 async function loadBatches(): Promise<void> {
   listLoading.value = true;
   errorText.value = null;
   try {
-    batches.value = await sendMsg('batch.list', {
+    const payload = {
       status: listFilter.value.status || undefined,
       date_from: listFilter.value.date_from ? new Date(listFilter.value.date_from).toISOString() : undefined,
       date_to: listFilter.value.date_to ? new Date(listFilter.value.date_to + 'T23:59:59').toISOString() : undefined,
       page: listPage.value,
       per_page: 20,
-    });
+    };
+    batches.value = isAdmin.value
+      ? await sendMsg('admin.listBatches', {
+          ...payload,
+          client_id: adminClientFilter.value || undefined,
+        })
+      : await sendMsg('batch.list', payload);
   } catch (e) {
     errorText.value = classifyError(e).text;
   } finally {
@@ -100,7 +152,9 @@ async function openDetail(b: BatchItem): Promise<void> {
   taskPage.value = 1;
   taskStatus.value = '';
   try {
-    detail.value = await sendMsg('batch.get', { batch_id: b.batch_id });
+    detail.value = isAdmin.value
+      ? await sendMsg('admin.getBatch', { batch_id: b.batch_id })
+      : await sendMsg('batch.get', { batch_id: b.batch_id });
     await Promise.all([loadTasks(), loadAttempts()]);
   } catch (e) {
     errorText.value = classifyError(e).text;
@@ -118,16 +172,20 @@ async function backToList(): Promise<void> {
 
 /**
  * 加载任务子表
+ * 管理员模式下走管理端接口（可读取任意客户端批次）
  */
 async function loadTasks(): Promise<void> {
   if (!detail.value) return;
   try {
-    tasks.value = await sendMsg('batch.tasks', {
+    const params = {
       batch_id: detail.value.batch_id,
       status: taskStatus.value || undefined,
       page: taskPage.value,
       per_page: 20,
-    });
+    };
+    tasks.value = isAdmin.value
+      ? await sendMsg('admin.batchTasks', params)
+      : await sendMsg('batch.tasks', params);
   } catch (e) {
     errorText.value = classifyError(e).text;
   }
@@ -171,7 +229,7 @@ async function runPrecheck(): Promise<boolean> {
  * @param action 动作
  */
 async function batchAction(action: 'start' | 'pause' | 'resume' | 'cancel' | 'retryFailed'): Promise<void> {
-  if (!detail.value || acting.value) return;
+  if (isAdmin.value || !detail.value || acting.value) return;
   errorText.value = null;
   feedback.value = null;
   // 开始前做运行前检查
@@ -209,7 +267,7 @@ async function batchAction(action: 'start' | 'pause' | 'resume' | 'cancel' | 're
  * @param t 目标任务
  */
 async function recollectTask(t: TaskItem): Promise<void> {
-  if (acting.value) return;
+  if (isAdmin.value || acting.value) return;
   errorText.value = null;
   feedback.value = null;
   acting.value = true;
@@ -249,6 +307,7 @@ const snapshotInfo = computed(() => {
     ? `${fmt(s.period_start)}${s.period_end ? ` ~ ${fmt(s.period_end)}` : ''}`
     : '—';
   return {
+    source: sourceLabel(detail.value?.source_platform ?? s.source_platform),
     region: (s.region ?? '—').toUpperCase(),
     variant: VARIANT_LABELS[s.ranking_variant ?? ''] ?? s.ranking_variant ?? '—',
     type: TYPE_LABELS[s.ranking_type ?? ''] ?? s.ranking_type ?? '—',
@@ -270,7 +329,26 @@ const TASK_FILTER_OPTIONS = [
   'SUCCESS', 'SKIPPED', 'FAILED', 'UNKNOWN', 'WAITING_VERIFICATION',
 ];
 
-onMounted(loadBatches);
+onMounted(async () => {
+  await sendMsg('ranking.sources', undefined)
+    .then((r) => {
+      sources.value = r.items.map((s) => ({ id: s.id, label: s.label }));
+    })
+    .catch(() => undefined);
+  await loadAdminClients();
+  await loadBatches();
+});
+
+// 隐藏设置切换管理员模式后，重置到列表层并按新数据源重新加载
+watch(isAdmin, async () => {
+  detail.value = null;
+  taskDrawer.value = null;
+  attempts.value = [];
+  listPage.value = 1;
+  adminClientFilter.value = '';
+  await loadAdminClients();
+  await loadBatches();
+});
 </script>
 
 <template>
@@ -280,6 +358,9 @@ onMounted(loadBatches);
 
     <!-- ============ 批次列表层 ============ -->
     <template v-if="!detail">
+      <div v-if="isAdmin" class="alert-bar" style="background:#eff6ff;border-color:#bfdbfe;color:#1e40af">
+        超级管理员只读视图：展示所有账号的抓取批次（不可控制执行）。
+      </div>
       <div class="card">
         <div class="form-row">
           <label>状态</label>
@@ -292,6 +373,15 @@ onMounted(loadBatches);
           <label>创建日期</label>
           <input v-model="listFilter.date_from" type="date" @change="((listPage = 1), loadBatches())" />
           <input v-model="listFilter.date_to" type="date" @change="((listPage = 1), loadBatches())" />
+        </div>
+        <div v-if="isAdmin" class="form-row">
+          <label>客户端</label>
+          <select v-model="adminClientFilter" @change="((listPage = 1), loadBatches())">
+            <option value="">全部客户端</option>
+            <option v-for="c in adminClients" :key="c.client_id" :value="c.client_id">
+              {{ c.display_name || c.client_id.slice(0, 8) }}
+            </option>
+          </select>
         </div>
         <div class="form-row">
           <label>站点</label>
@@ -310,14 +400,21 @@ onMounted(loadBatches);
       <div v-else class="card" style="padding: 8px">
         <table class="list">
           <thead>
-            <tr><th>批次号</th><th>创建时间</th><th>进度</th><th>结果</th><th>状态</th><th>起止</th><th></th></tr>
+            <tr>
+              <th>批次号</th><th v-if="isAdmin">客户端</th><th>创建时间</th><th>进度</th><th>结果</th><th>状态</th><th>起止</th><th></th>
+            </tr>
           </thead>
           <tbody>
             <tr v-for="b in visibleBatches" :key="b.batch_id">
               <td>
                 <div class="mono">{{ b.batch_id.slice(0, 8) }}</div>
+                <div class="small"><span class="badge info">{{ sourceLabel(b.source_platform ?? b.snapshot?.source_platform) }}</span></div>
                 <div class="muted small mono" v-if="b.source_snapshot_id">快照 {{ b.source_snapshot_id.slice(0, 8) }}</div>
                 <div class="muted small mono" v-if="b.parent_batch_id">补采自 {{ b.parent_batch_id.slice(0, 8) }}</div>
+              </td>
+              <td v-if="isAdmin" class="small">
+                {{ clientLabel(b.client_id) }}
+                <div class="muted mono">{{ b.client_id?.slice(0, 8) ?? '—' }}</div>
               </td>
               <td class="small">{{ formatTime(b.created_at) }}</td>
               <td class="small">{{ batchProgress(b).done }}/{{ batchProgress(b).total || '—' }}</td>
@@ -350,8 +447,10 @@ onMounted(loadBatches);
         </div>
         <h3>
           批次 <span class="mono">{{ detail.batch_id.slice(0, 8) }}</span>
+          <span class="badge info">{{ sourceLabel(detail.source_platform ?? detail.snapshot?.source_platform) }}</span>
           <span :class="statusBadgeClass(detail.status)">{{ statusText(detail.status) }}</span>
           <span v-if="store.state?.active_batch_id === detail.batch_id" class="badge info">本客户端执行中</span>
+          <span v-if="isAdmin" class="badge info">管理员只读 · {{ clientLabel(detail.client_id) }}</span>
         </h3>
         <div class="small muted">
           创建 {{ formatTime(detail.created_at) }} · 开始 {{ formatTime(detail.started_at) }} · 结束 {{ formatTime(detail.finished_at) }}
@@ -360,7 +459,7 @@ onMounted(loadBatches);
         </div>
         <!-- 来源榜单信息：站点/榜单/类型/类目/日期/条数 -->
         <div v-if="snapshotInfo" class="small" style="margin-top: 4px">
-          榜单 {{ snapshotInfo.region }} · {{ snapshotInfo.variant }} · {{ snapshotInfo.type }} ·
+          来源 {{ snapshotInfo.source }} · 榜单 {{ snapshotInfo.region }} · {{ snapshotInfo.variant }} · {{ snapshotInfo.type }} ·
           类目 {{ snapshotInfo.category }} · 日期 {{ snapshotInfo.period }} · 快照 {{ snapshotInfo.total }} 条
         </div>
         <div class="progress" style="margin: 8px 0">
@@ -372,12 +471,17 @@ onMounted(loadBatches);
           失败 {{ detail.summary?.failed ?? 0 }} · 不确定 {{ detail.summary?.unknown ?? 0 }}
         </div>
         <div class="btn-row" style="flex-wrap: wrap">
-          <button class="primary" :disabled="!canStart || acting" @click="batchAction('start')">{{ detail.status === 'CANCELLED' ? '重新开始' : '开始' }}</button>
-          <button class="act" :disabled="!canPause || acting" @click="batchAction('pause')">暂停</button>
-          <button class="act" :disabled="!canResume || acting" @click="batchAction('resume')">继续</button>
-          <button class="act danger" :disabled="!canCancel || acting" @click="batchAction('cancel')">停止</button>
-          <button class="act" :disabled="!canRetryFailed || acting" @click="batchAction('retryFailed')">失败重试</button>
+          <template v-if="!isAdmin">
+            <button class="primary" :disabled="!canStart || acting" @click="batchAction('start')">{{ detail.status === 'CANCELLED' ? '重新开始' : '开始' }}</button>
+            <button class="act" :disabled="!canPause || acting" @click="batchAction('pause')">暂停</button>
+            <button class="act" :disabled="!canResume || acting" @click="batchAction('resume')">继续</button>
+            <button class="act danger" :disabled="!canCancel || acting" @click="batchAction('cancel')">停止</button>
+            <button class="act" :disabled="!canRetryFailed || acting" @click="batchAction('retryFailed')">失败重试</button>
+          </template>
           <button class="act" @click="viewBatchProducts(detail)">查看商品</button>
+        </div>
+        <div v-if="isAdmin" class="small muted" style="margin-top: 6px">
+          超级管理员只读视图：可查看任意客户端的批次与任务，不能开始/暂停/停止或重新抓取。
         </div>
         <!-- 运行前检查结果：不通过时显示具体错误与重新检测 -->
         <div v-if="precheckErrors.length" class="alert-bar err" style="margin-top: 8px">
@@ -414,7 +518,7 @@ onMounted(loadBatches);
                 <td>
                   <button class="link" @click="taskDrawer = t">详情</button>
                   <button
-                    v-if="['SKIPPED', 'FAILED'].includes(t.status)"
+                    v-if="!isAdmin && ['SKIPPED', 'FAILED'].includes(t.status)"
                     class="link"
                     :disabled="acting"
                     @click="recollectTask(t)"
@@ -467,7 +571,7 @@ onMounted(loadBatches);
         <div class="kv"><b>创建/更新</b><span>{{ formatTime(taskDrawer.created_at) }} / {{ formatTime(taskDrawer.updated_at) }}</span></div>
         <div class="btn-row" style="margin-top: 10px">
           <button
-            v-if="['SKIPPED', 'FAILED'].includes(taskDrawer.status)"
+            v-if="!isAdmin && ['SKIPPED', 'FAILED'].includes(taskDrawer.status)"
             class="primary"
             :disabled="acting"
             @click="recollectTask(taskDrawer)"

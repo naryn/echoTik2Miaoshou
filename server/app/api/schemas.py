@@ -1,9 +1,11 @@
 """API 请求/响应模型（Pydantic v2）与 ORM 序列化辅助。"""
 
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
+from app.config import ALLOWED_SOURCE_PLATFORMS, DEFAULT_SOURCE_PLATFORM
 from app.models import (
     CollectionAttempt,
     CollectionBatch,
@@ -11,6 +13,7 @@ from app.models import (
     CollectorClient,
     Product,
     RankEntry,
+    RankingPreset,
     RankSnapshot,
     TaskEvent,
 )
@@ -19,6 +22,20 @@ from app.models import (
 def dt(value: datetime | None) -> str | None:
     """序列化 UTC 时间为 ISO8601 字符串。"""
     return value.isoformat() if value else None
+
+
+def _validate_source_platform(value: str) -> str:
+    """校验榜单数据来源平台白名单（ECHOTIK / FASTMOSS），非法值返回 422。"""
+    normalized = value.strip().upper()
+    if normalized not in ALLOWED_SOURCE_PLATFORMS:
+        raise ValueError(
+            f"source_platform 仅支持 {sorted(ALLOWED_SOURCE_PLATFORMS)}，收到 {value!r}"
+        )
+    return normalized
+
+
+# 榜单数据来源平台类型（区别于 Product.platform 的电商平台字段）
+SourcePlatform = Annotated[str, AfterValidator(_validate_source_platform)]
 
 
 # ---------- 请求模型 ----------
@@ -45,6 +62,7 @@ class SnapshotCreateRequest(BaseModel):
     """榜单快照创建请求（request_id 幂等）。"""
 
     request_id: str = Field(min_length=1, max_length=64)
+    source_platform: SourcePlatform = Field(default=DEFAULT_SOURCE_PLATFORM, max_length=16)
     region: str = Field(min_length=1, max_length=16)
     ranking_type: str = Field(min_length=1, max_length=32)
     ranking_variant: str | None = None
@@ -52,6 +70,13 @@ class SnapshotCreateRequest(BaseModel):
     period_start: str | None = None
     period_end: str | None = None
     filter_json: dict | None = None
+
+
+class RankingPresetUpsertRequest(BaseModel):
+    """创建或按名称覆盖账号级榜单筛选预设。"""
+
+    name: str = Field(min_length=1, max_length=128)
+    query_json: dict
 
 
 class EntryItem(BaseModel):
@@ -88,6 +113,8 @@ class BatchCreateRequest(BaseModel):
     """采集批次创建请求（idempotency_key 幂等）。"""
 
     idempotency_key: str = Field(min_length=1, max_length=64)
+    # 无快照时使用；带 snapshot_id 时以快照的 source_platform 为准
+    source_platform: SourcePlatform = Field(default=DEFAULT_SOURCE_PLATFORM, max_length=16)
     snapshot_id: str | None = None
     product_ids: list[str] | None = None
     exclude_already_successful: bool = False
@@ -185,6 +212,7 @@ def snapshot_out(s: RankSnapshot) -> dict:
     return {
         "snapshot_id": s.snapshot_id,
         "client_id": s.client_id,
+        "source_platform": s.source_platform,
         "region": s.region,
         "ranking_type": s.ranking_type,
         "ranking_variant": s.ranking_variant,
@@ -226,6 +254,7 @@ def batch_out(
     data = {
         "batch_id": b.batch_id,
         "client_id": b.client_id,
+        "source_platform": b.source_platform,
         "source_snapshot_id": b.source_snapshot_id,
         "parent_batch_id": b.parent_batch_id,
         "status": b.status,

@@ -8,7 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api import routes_batches, routes_clients, routes_rank, routes_tasks
+from app.api import routes_admin, routes_auth, routes_batches, routes_clients, routes_rank, routes_tasks
 from app.api.deps import error_body, ok, set_request_id
 from app.config import CORS_ALLOW_ORIGINS
 from app.db import init_db
@@ -70,9 +70,11 @@ def create_app() -> FastAPI:
         return ok({"status": "ok"})
 
     app.include_router(routes_clients.router)
+    app.include_router(routes_auth.router)
     app.include_router(routes_rank.router)
     app.include_router(routes_batches.router)
     app.include_router(routes_tasks.router)
+    app.include_router(routes_admin.router)
     return app
 
 

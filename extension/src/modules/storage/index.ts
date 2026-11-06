@@ -42,6 +42,12 @@ export const STORAGE_DEFAULTS = {
   exec_config: DEFAULT_EXEC_CONFIG as ExecConfig,
   /** 行为配置（规范 §3.7） */
   behavior_config: DEFAULT_BEHAVIOR_CONFIG as BehaviorConfig,
+  /** 插件设置填写的认证 Token（Bearer；为空表示未授权，不能使用插件） */
+  auth_token: null as string | null,
+  /** 认证账号角色（由 /v1/auth/me 返回，USER/ADMIN） */
+  identity_role: null as string | null,
+  /** 认证账号显示名 */
+  identity_display_name: null as string | null,
 };
 
 export type StorageKey = keyof typeof STORAGE_DEFAULTS;
@@ -108,7 +114,8 @@ export async function saveClientIdentity(id: Partial<ClientIdentity>): Promise<v
 // ---------------- IndexedDB ----------------
 
 const DB_NAME = 'echotik_miaoshou_collector';
-const DB_VERSION = 2;
+/** v3：移除本地商品库（商品列表统一改读服务端） */
+const DB_VERSION = 3;
 
 /** IndexedDB store 名称枚举 */
 export const IDB_STORES = [
@@ -117,34 +124,8 @@ export const IDB_STORES = [
   'outbox_events',
   'recent_task_checks',
   'ui_cached_queries',
-  /** 本地采集商品（商品列表页唯一数据源，不上报远端） */
-  'local_products',
 ] as const;
 export type IdbStore = (typeof IDB_STORES)[number];
-
-/** 本地采集商品记录（来自 EchoTik 采集结果，按 region+商品ID 去重） */
-export interface LocalProductRecord {
-  /** 主键 `${region}:${external_product_id}` */
-  id: string;
-  platform: string;
-  region: string;
-  external_product_id: string;
-  title: string | null;
-  shop_id: string | null;
-  shop_name: string | null;
-  rank_position: number | null;
-  sales_value: number | null;
-  gmv_value: number | null;
-  image_url: string | null;
-  category: string | null;
-  detail_url: string;
-  /** 产生该记录的远端快照 ID（仅溯源展示，不读取远端列表） */
-  snapshot_id: string;
-  ranking_variant: string;
-  ranking_type: string;
-  period_start: string | null;
-  collected_at: string;
-}
 
 /** outbox 事件记录 */
 export interface OutboxEvent {
@@ -165,6 +146,10 @@ export function openDb(): Promise<IDBDatabase> {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
+      // 迁移：商品数据统一改为读取服务端，清理历史版本遗留的本地商品库
+      if (db.objectStoreNames.contains('local_products')) {
+        db.deleteObjectStore('local_products');
+      }
       for (const store of IDB_STORES) {
         if (!db.objectStoreNames.contains(store)) {
           if (store === 'outbox_events') {

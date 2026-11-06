@@ -1,13 +1,14 @@
 <script setup lang="ts">
 /**
- * Side Panel 应用外壳（规范 §3.1 全局固定区）：
+ * 管理台应用外壳（独立页面窗口，规范 §3.1 全局固定区）：
  * 标题、客户端短 ID、连接/同步状态灯、当前运行态条、最近异常、六页导航。
  * 危险动作（停止批次）二次确认；刷新/关闭侧栏不影响批次运行。
  */
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
-import { locateWorkerTab, pauseRunner, refreshState, resumeRunner, store } from './store';
+import { locateWorkerTab, pauseRunner, refreshState, resumeRunner, setAuthToken, store } from './store';
 import { sendMsg } from '@/shared/messaging';
+import { storageGet } from '@/modules/storage';
 
 const route = useRoute();
 
@@ -15,6 +16,43 @@ const route = useRoute();
 const confirmCancel = ref(false);
 /** 操作进行中 */
 const acting = ref(false);
+
+/** 是否已通过认证 Token 授权 */
+const authorized = computed(() => !!store.state?.authorized);
+/** 授权页输入 */
+const authInput = ref('');
+const serverInput = ref('');
+const authBusy = ref(false);
+const authError = ref<string | null>(null);
+
+onMounted(async () => {
+  authInput.value = (await storageGet('auth_token')) ?? '';
+  serverInput.value = await storageGet('server_url');
+});
+
+/**
+ * 激活授权：保存服务器地址并验证认证 Token
+ */
+async function activate(): Promise<void> {
+  const token = authInput.value.trim();
+  if (!token) {
+    authError.value = '请输入认证 Token';
+    return;
+  }
+  authBusy.value = true;
+  authError.value = null;
+  try {
+    if (serverInput.value.trim()) {
+      await sendMsg('client.updateServerUrl', { server_url: serverInput.value.trim() });
+    }
+    await setAuthToken(token);
+    if (!store.state?.authorized) authError.value = '认证 Token 无效或已停用';
+  } catch (e) {
+    authError.value = (e as Error).message;
+  } finally {
+    authBusy.value = false;
+  }
+}
 
 /** 连接状态灯样式 */
 const connClass = computed(() => {
@@ -25,7 +63,7 @@ const connClass = computed(() => {
 /** 连接状态文案 */
 const connText = computed(() => {
   if (!store.state) return '加载中';
-  if (!store.state.registered) return '未注册';
+  if (!store.state.authorized) return '未授权';
   return store.state.connected ? '已连接' : '远端离线';
 });
 
@@ -69,17 +107,20 @@ async function doCancel(): Promise<void> {
 <template>
   <div class="app-shell">
     <header class="app-header">
-      <h1>EchoTik 采集助手</h1>
+      <h1>TK 采集助手</h1>
       <span class="client-id">客户端 {{ shortClientId }}</span>
+      <span v-if="store.state?.role === 'ADMIN'" class="client-id" title="管理员：可查看所有账号数据">管理员</span>
+      <span v-if="store.state?.display_name" class="client-id">{{ store.state.display_name }}</span>
       <span :class="connClass" :title="connText"></span>
       <span class="client-id">{{ connText }}</span>
     </header>
 
-    <nav class="app-nav">
+    <nav v-if="authorized" class="app-nav">
       <RouterLink
         v-for="r in [
           { to: '/', label: '概览' },
           { to: '/ranking', label: '榜单采集' },
+          { to: '/ranking-history', label: '历史榜单' },
           { to: '/products', label: '商品列表' },
           { to: '/tasks', label: '任务' },
           { to: '/logs', label: '日志' },
@@ -93,8 +134,26 @@ async function doCancel(): Promise<void> {
     </nav>
 
     <main class="app-main">
+      <!-- 未授权：插件不可用，必须先填写认证 Token -->
+      <div v-if="store.state && !authorized" class="card" style="margin-top: 12px">
+        <h3>需要授权</h3>
+        <p class="small muted">请填写认证 Token 后开始使用。</p>
+        <div class="form-row">
+          <label>服务器</label>
+          <input v-model="serverInput" placeholder="http://127.0.0.1:8000" />
+        </div>
+        <div class="form-row">
+          <label>认证 Token</label>
+          <input v-model="authInput" type="password" placeholder="输入认证 Token" @keyup.enter="activate" />
+        </div>
+        <div class="btn-row">
+          <button class="primary" :disabled="authBusy" @click="activate">{{ authBusy ? '验证中…' : '激活' }}</button>
+        </div>
+        <p v-if="authError" class="alert-bar err" style="margin-bottom: 0">{{ authError }}</p>
+      </div>
+
       <!-- 当前运行态条：批次进行中时全局可见 -->
-      <div v-if="store.state?.active_batch_id" class="run-bar">
+      <div v-if="authorized && store.state?.active_batch_id" class="run-bar">
         <div>
           当前批次：<span class="mono">{{ store.state.active_batch_id.slice(0, 8) }}</span> ·
           <span :class="{ 'tag-pending-verify': store.state.waiting_verification }">{{ runStateText }}</span>
@@ -115,10 +174,10 @@ async function doCancel(): Promise<void> {
       </div>
 
       <!-- 最近异常提示 -->
-      <div v-if="store.error" class="alert-bar err">连接异常：{{ store.error }}</div>
-      <div v-else-if="store.state?.last_error" class="alert-bar">最近异常：{{ store.state.last_error }}</div>
+      <div v-if="authorized && store.error" class="alert-bar err">连接异常：{{ store.error }}</div>
+      <div v-else-if="authorized && store.state?.last_error" class="alert-bar">最近异常：{{ store.state.last_error }}</div>
 
-      <RouterView />
+      <RouterView v-if="authorized" />
     </main>
 
     <!-- 停止批次二次确认 -->

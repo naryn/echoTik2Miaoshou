@@ -352,14 +352,27 @@ def list_attempts(
     error_code: str | None = None,
     date_from: datetime | None = None,
     date_to: datetime | None = None,
+    scope_client_id: str | None = None,
     page: int = 1,
     per_page: int = 20,
 ) -> tuple[list[CollectionAttempt], int]:
-    """采集尝试日志按时间/批次/任务/结果/错误码筛选分页。"""
+    """采集尝试日志按时间/批次/任务/结果/错误码筛选分页。
+
+    scope_client_id 非空时仅返回该客户端批次下的尝试记录。
+    """
     from sqlalchemy import func
 
     stmt = select(CollectionAttempt)
     count_stmt = select(func.count(CollectionAttempt.attempt_id))
+    if scope_client_id:
+        own_batches = select(CollectionBatch.batch_id).where(
+            CollectionBatch.client_id == scope_client_id
+        )
+        scoped_task_ids = select(CollectionTask.task_id).where(
+            CollectionTask.batch_id.in_(own_batches)
+        )
+        stmt = stmt.where(CollectionAttempt.task_id.in_(scoped_task_ids))
+        count_stmt = count_stmt.where(CollectionAttempt.task_id.in_(scoped_task_ids))
     if task_id:
         stmt = stmt.where(CollectionAttempt.task_id == task_id)
         count_stmt = count_stmt.where(CollectionAttempt.task_id == task_id)

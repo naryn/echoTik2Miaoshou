@@ -11,8 +11,11 @@
 import { z } from 'zod';
 import {
   ERROR_CODES,
+  getPeriodDays,
+  getPeriodStartDate,
+  getPeriodType,
   type CategoryNode,
-  type IEchoTikAdapter,
+  type IRankingAdapter,
   type ProductRankingEntry,
   type RankingCapabilities,
   type RankingPage,
@@ -45,11 +48,14 @@ function isSuccessCode(code: number): boolean {
 }
 
 /**
- * 接口单页数量上限：免费/访客套餐只允许 per_page<=10，
- * 超过会返回 HTTP 200 的会员限制 HTML 页（"member plan is Visitor..."），
- * 表现为 JSON 解析失败。付费套餐可放宽，这里按最保守值取。
+ * 接口单页数量上限：按文档示例取 50（per_page=50）。
+ * 若账号套餐不支持（如访客套餐），接口会返回 HTTP 200 的会员限制 HTML 页，
+ * 表现为 JSON 解析失败，适配器按 PERMISSION_LIMIT 结束并保留已抓部分。
  */
-const MAX_PAGE_SIZE = 10;
+const MAX_PAGE_SIZE = 50;
+/** 默认单页数量（20 条/页）与默认页数上限（最多 5 页） */
+const DEFAULT_PAGE_SIZE = 20;
+const DEFAULT_MAX_PAGES = 5;
 /** 翻页之间的随机等待区间（毫秒），降低连续请求被风控/限流的概率 */
 const PAGE_INTERVAL_MIN_MS = 2000;
 const PAGE_INTERVAL_MAX_MS = 5000;
@@ -124,7 +130,7 @@ const ADAPTER_VERSION = 'echotik-adapter/1.0.0';
  * 创建 EchoTik 适配器
  * @param transport 页面同源请求传输层
  */
-export function createEchoTikAdapter(transport: EchoTikTransport): IEchoTikAdapter & {
+export function createEchoTikAdapter(transport: EchoTikTransport): IRankingAdapter & {
   fetchAllRankings(
     query: RankingQuery,
     onProgress?: (fetched: number, page: number) => void,
@@ -182,32 +188,42 @@ export function createEchoTikAdapter(transport: EchoTikTransport): IEchoTikAdapt
   }
 
   /**
-   * 将 RankingQuery 映射为接口 query 参数（严格按文档字段名）
+   * 将 RankingQuery 翻译为 EchoTik 接口 query 参数
    * - 榜单三接口：time_type / time_range / page / per_page / product_categories / order
-   * - 商品库接口：page / per_page / dateRange / product_categories / order / sort（无 time_type/time_range）
-   * @param query 查询条件
+   * - 商品库接口：page / per_page / dateRange / product_categories / order（无 time_type/time_range）
+   * 本函数内部从 period 对象读日期，自行转 yyyyMMdd；UI 层不再碰 EchoTik 专属格式。
+   * @param query 领域查询
    * @param page 页码
    * @param perPage 每页数量
    */
   function toParams(query: RankingQuery, page: number, perPage: number): Record<string, string | number> {
     const variant = (query.rankingVariant as string) ?? 'top-sold';
-    if (variant === PRODUCTS_VARIANT) {
+    const periodType = getPeriodType(query) ?? 'daily';
+    const startDate = getPeriodStartDate(query);
+
+    if (variant === PRODUCTS_VARIANT || periodType === 'products') {
       const params: Record<string, string | number> = {
         page,
         per_page: perPage,
-        dateRange: query.dateRange ?? 7,
+        dateRange: getPeriodDays(query) ?? 7,
         product_categories: query.categoryId ?? '',
         sort: 'desc',
       };
       if (query.sortBy) params.order = query.sortBy;
       return params;
     }
+
+    // EchoTik 榜单：time_type + time_range=yyyyMMdd（适配器内部自算，UI 不再碰）
+    const timeRange = startDate ? startDate.replaceAll('-', '') : '';
     const params: Record<string, string | number> = {
-      time_type: String(query.rankingType).toLowerCase(),
-      time_range: query.periodStart ?? '',
+      // EchoTik 前端实际使用 PHP 风格数组参数 product_categories[]；
+      // product_categories 虽在旧接口文档中出现，但当前服务端不会将其视为页面筛选条件。
+      '__echotik_region': query.region,
+      time_type: periodType,
+      time_range: timeRange,
       page,
       per_page: perPage,
-      product_categories: query.categoryId ?? '',
+      'product_categories[]': query.categoryId ?? '',
     };
     if (query.sortBy) params.order = query.sortBy;
     return params;
@@ -244,11 +260,12 @@ export function createEchoTikAdapter(transport: EchoTikTransport): IEchoTikAdapt
      */
     async fetchRankingPage(query: RankingQuery, _cursor?: string, page = 1): Promise<RankingPage> {
       const variant = (query.rankingVariant as string) ?? 'top-sold';
-      const perPage = Math.min(MAX_PAGE_SIZE, Math.max(1, query.perPage ?? query.limit ?? MAX_PAGE_SIZE));
+      const perPage = Math.min(MAX_PAGE_SIZE, Math.max(1, query.perPage ?? DEFAULT_PAGE_SIZE));
       const { data, meta } = await callLeaderboard(variant, toParams(query, page, perPage));
       return {
         records: data,
-        hasMore: meta.current_page < meta.last_page,
+        // 本页条数未达到 perPage 说明已到最后一页，无需再翻页
+        hasMore: data.length >= perPage && meta.current_page < meta.last_page,
         page: meta.current_page,
         total: meta.total,
       };
@@ -272,8 +289,8 @@ export function createEchoTikAdapter(transport: EchoTikTransport): IEchoTikAdapt
      */
     async fetchAllRankings(query, onProgress, shouldStop) {
       const variant = (query.rankingVariant as string) ?? 'top-sold';
-      const perPage = Math.min(MAX_PAGE_SIZE, Math.max(1, query.perPage ?? query.limit));
-      const maxPages = Math.max(1, query.maxPages ?? 100);
+      const perPage = Math.min(MAX_PAGE_SIZE, Math.max(1, query.perPage ?? DEFAULT_PAGE_SIZE));
+      const maxPages = Math.max(1, query.maxPages ?? DEFAULT_MAX_PAGES);
       const startRank = Math.max(1, query.startRank || 1);
       const startPage = Math.floor((startRank - 1) / perPage) + 1;
       const entries: ProductRankingEntry[] = [];
@@ -335,6 +352,11 @@ export function createEchoTikAdapter(transport: EchoTikTransport): IEchoTikAdapt
         if (entries.length >= query.limit) break;
         if (newOnThisPage === 0) {
           reason = 'DUPLICATE_PAGE';
+          break;
+        }
+        // 本页返回条数未达到 perPage：数据已不足一页，无需继续请求下一页
+        if (data.length < perPage) {
+          reason = 'NO_MORE_PAGES';
           break;
         }
         if (meta.current_page >= meta.last_page) {

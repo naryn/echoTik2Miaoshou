@@ -66,6 +66,9 @@ export default defineContentScript({
       // 真实落地页：/us/pdp/{slug}/{id}
       const m = url.match(/\/pdp\/(?:[^/?#]*\/)*(\d{6,})(?:[/?#]|$)/);
       if (m) return m[1]!;
+      // FastMoss 等榜单来源提供的 TikTok Shop 详情链接：/view/product/{id}?region=XX
+      const viewProduct = url.match(/\/view\/product\/(\d{6,})(?:[/?#]|$)/);
+      if (viewProduct) return viewProduct[1]!;
       const legacy = url.match(/\/shop\/pdp\/(\d+)/);
       if (legacy) return legacy[1]!;
       const q = url.match(/[?&]productId=(\d+)/);
@@ -176,11 +179,14 @@ export default defineContentScript({
           reason: `URL 商品 ID ${urlProductId} 与任务期望 ${expectedProductId} 不一致`,
         };
       }
-      if (!signals.productEvidenceFound) {
-        return { state: 'LOADING', productId: urlProductId, reason: '商品内容尚未渲染' };
-      }
-      await dlog('tiktok', 'probe: 页面就绪', { productId: urlProductId });
-      return { state: 'READY', productId: urlProductId, evidence: 'URL 商品 ID 匹配且页面证据存在' };
+      // 新版 TikTok Shop PDP 的标题/价格 DOM 经常变化，不能把启用妙手采集的前置条件
+      // 绑死在这些弱选择器上。URL 已精确匹配商品且没有验证时即可推进；后续妙手适配器
+      // 会独立等待最多 30 秒，确认“采集此商品”按钮真正注入后才点击。
+      const evidence = signals.productEvidenceFound
+        ? 'URL 商品 ID 匹配且页面证据存在'
+        : 'URL 商品 ID 匹配（商品 DOM 探针未命中，继续等待妙手按钮注入）';
+      await dlog('tiktok', 'probe: 页面就绪', { productId: urlProductId, productEvidenceFound: signals.productEvidenceFound });
+      return { state: 'READY', productId: urlProductId, evidence };
     }
 
     /**
@@ -231,8 +237,13 @@ export default defineContentScript({
           .catch(() => undefined);
         return;
       }
-      // 商品就绪上报（供 NAVIGATING 阶段推进）
-      if (productId && signals.productEvidenceFound && verdict.state === 'CLEAR') {
+      // URL 商品 ID 匹配已足以让后台进入妙手按钮检测；不要依赖易变的商品 DOM 结构。
+      if (productId && verdict.state === 'CLEAR') {
+        void dlog('tiktok', '上报商品页面就绪', {
+          productId,
+          productEvidenceFound: signals.productEvidenceFound,
+          url: location.href.slice(0, 160),
+        });
         void browser.runtime
           .sendMessage({ type: 'tiktok.pageReady', payload: { productId, url: location.href } })
           .catch(() => undefined);
@@ -253,5 +264,10 @@ export default defineContentScript({
 
     // 初始延迟检测一次（等待 SPA 首屏渲染）
     setTimeout(checkAndReport, 2_000);
+    // 人工完成验证后，TikTok 有时只更新 iframe 内部状态而不会触发当前文档的 DOM mutation。
+    // 等待恢复期间定时复查，确保验证页恢复商品内容后能主动通知 background 继续执行。
+    setInterval(() => {
+      if (waitingRecovery) checkAndReport();
+    }, 3_000);
   },
 });

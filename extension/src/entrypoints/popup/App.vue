@@ -1,9 +1,8 @@
 <script setup lang="ts">
 /**
- * Popup：连接状态 + 当前批次进度 + 打开 Side Panel 按钮
+ * Popup：连接状态 + 当前批次进度 + 打开管理台按钮
  */
 import { onMounted, ref } from 'vue';
-import { browser } from 'wxt/browser';
 import { sendMsg } from '@/shared/messaging';
 import type { RuntimePublicState } from '@/shared/types';
 
@@ -14,20 +13,17 @@ onMounted(async () => {
 });
 
 /**
- * 打开 Side Panel 并关闭 popup
+ * 打开管理台：由 background 以独立窗口打开扩展页面（不叠加在网页上）
  */
 async function openPanel(): Promise<void> {
-  const win = await browser.windows.getCurrent();
-  if (win.id != null) {
-    await browser.sidePanel.open({ windowId: win.id }).catch(() => undefined);
-  }
+  await sendMsg('widget.openDashboard', undefined).catch(() => undefined);
   window.close();
 }
 </script>
 
 <template>
   <div class="wrap">
-    <h1>EchoTik 采集助手</h1>
+    <h1>TK 采集助手</h1>
     <div class="row">
       <span class="dot" :class="state?.connected ? 'on' : 'off'"></span>
       {{ state?.connected ? '远程已连接' : '远程未连接' }}

@@ -47,24 +47,114 @@ export const RANKING_VARIANTS = ['top-sold', 'hot-sell', 'news-burst', 'products
 export type RankingVariant = (typeof RANKING_VARIANTS)[number];
 export const RankingVariantSchema = z.enum(RANKING_VARIANTS);
 
-/** 榜单查询条件（适配器输入，规范 §4.1） */
+/** 榜单数据来源平台（新增平台时在此追加，并在 modules/ranking/registry.ts 注册适配器） */
+export const RANKING_SOURCES = ['ECHOTIK', 'FASTMOSS'] as const;
+/** 来源平台标识 */
+export type RankingSource = (typeof RANKING_SOURCES)[number];
+/** 来源平台展示名 */
+export const RANKING_SOURCE_LABELS: Record<RankingSource, string> = {
+  ECHOTIK: 'EchoTik',
+  FASTMOSS: 'FastMoss',
+};
+
+/**
+ * 日期时段（领域层，跨平台统一语义；各 adapter 自行翻译成平台专属格式）
+ * - daily/weekly/monthly 榜单：startDate 为周期起始日（yyyy-MM-dd），endDate 可空或为结束日
+ * - products 商品库：type='products' 时忽略 period，改看 periodDays（天数）
+ */
+export interface RankingPeriod {
+  /** 榜单类型：daily | weekly | monthly | products */
+  type: TimeType | 'products';
+  /** 周期起始（yyyy-MM-dd）：daily=当天、weekly=周一、monthly=当月1日 */
+  startDate?: string;
+  /** 周期结束（yyyy-MM-dd）：daily=startDate，weekly=startDate+6，monthly=月末 */
+  endDate?: string;
+  /** 商品库统计天数（7 / 30），仅 products 变体使用 */
+  periodDays?: number;
+}
+
+/**
+ * 榜单采集领域查询（平台无关）
+ * 各 adapter 在 fetchRankingPage 内部自行把 period 翻译成自己的接口参数（EchoTik: time_type/time_range=yyyyMMdd；FastMoss: date_type/date_value 或 start_date/end_date/rank_type）
+ */
 export interface RankingQuery {
+  /** 数据来源平台，默认 ECHOTIK */
+  source?: RankingSource;
   region: string;
+  /** 分类 ID（各平台格式不同：EchoTik 三级 ID 链；FastMoss l1_cid；由 adapter 自行处理） */
   categoryId?: string;
-  rankingType: TimeType | string;
+  /** 榜单变体：接口路径末段（products 为商品库列表接口） */
   rankingVariant?: RankingVariant | string;
-  /** yyyyMMdd */
+  /** 日期时段（统一语义，平台无关） */
+  period?: RankingPeriod;
+  /** 兼容旧字段：榜单类型（daily/weekly/monthly/products），UI 新代码不再写，adapter 仍会读取以兼容快照重跑 */
+  rankingType?: TimeType | 'products' | string;
+  /** 兼容旧字段：yyyyMMdd（UI 新代码不再写，adapter 仍会读取以兼容快照重跑） */
   periodStart?: string;
   periodEnd?: string;
-  /** 商品库接口统计时间范围（天），仅 rankingVariant=products 使用 */
+  /** 商品库统计天数（兼容旧字段，UI 新代码写在 period.periodDays） */
   dateRange?: number;
   sortBy?: string;
   startRank: number;
   limit: number;
-  /** 单页数量（默认 50 上限，请求配置折叠区可调整） */
   perPage?: number;
-  /** 页数上限（防止异常分页无限循环） */
   maxPages?: number;
+}
+
+/**
+ * 领域层辅助：从 RankingQuery 读取周期类型，优先 period.type 其次 rankingType 旧字段
+ */
+export function getPeriodType(query: RankingQuery): TimeType | 'products' | undefined {
+  if (query.period?.type) return query.period.type;
+  if (query.rankingType === 'products') return 'products';
+  const t = query.rankingType;
+  if (t === 'daily' || t === 'weekly' || t === 'monthly') return t;
+  return undefined;
+}
+
+/**
+ * 领域层辅助：从 RankingQuery 读取 yyyy-MM-dd 起始日期
+ * 优先 period.startDate；fallback 旧字段 periodStart(yyyyMMdd)
+ */
+export function getPeriodStartDate(query: RankingQuery): string | undefined {
+  if (query.period?.startDate) return query.period.startDate;
+  if (query.periodStart && /^\d{8}$/.test(query.periodStart)) {
+    return `${query.periodStart.slice(0, 4)}-${query.periodStart.slice(4, 6)}-${query.periodStart.slice(6, 8)}`;
+  }
+  return undefined;
+}
+
+/**
+ * 领域层辅助：把日期控件值转成 yyyy-MM-dd 起始日期
+ * @param type 周期类型：daily/weekly/monthly
+ * @param date daily 时的 yyyy-MM-dd
+ * @param week weekly 时的 ISO 周字符串 yyyy-Www（如 2026-W45）
+ * @param month monthly 时的 yyyy-MM
+ */
+export function computePeriodStartDate(
+  type: TimeType,
+  date?: string,
+  week?: string,
+  month?: string,
+): string | undefined {
+  if (type === 'daily' && date) return date;
+  if (type === 'weekly' && week) {
+    // ISO 周 → 周一日期
+    const [y, w] = week.split('-W').map(Number);
+    if (!y || !w) return undefined;
+    const d = new Date(Date.UTC(y, 0, 4));
+    d.setUTCDate(d.getUTCDate() + (w - 1) * 7 - ((d.getUTCDay() + 6) % 7));
+    return d.toISOString().slice(0, 10);
+  }
+  if (type === 'monthly' && month) return `${month}-01`;
+  return undefined;
+}
+
+/**
+ * 领域层辅助：从 RankingQuery 读取商品库天数（7 / 30）
+ */
+export function getPeriodDays(query: RankingQuery): number | undefined {
+  return query.period?.periodDays ?? query.dateRange;
 }
 
 /** 原始榜单条目（EchoTik data 数组元素，结构见 docs/interface/*.md） */
@@ -173,12 +263,20 @@ export interface ProductRankingEntry {
   observed_at: string;
 }
 
-/** EchoTik 适配器合约（规范 §4.1） */
-export interface IEchoTikAdapter {
+/** 榜单适配器合约（多平台实现见 modules/ranking/registry.ts） */
+export interface IRankingAdapter {
   capabilities(): Promise<RankingCapabilities>;
   readCurrentPageSelection(tabId: number): Promise<Partial<RankingQuery>>;
   fetchRankingPage(query: RankingQuery, cursor?: string, page?: number): Promise<RankingPage>;
   normalize(item: RawRankingItem, query: RankingQuery, rankPosition: number): ProductRankingEntry;
+  /** 分页聚合抓取到底（按 limit 截断），返回归一化后的条目 */
+  fetchAllRankings(
+    query: RankingQuery,
+    onProgress?: (fetched: number, page: number) => void,
+    shouldStop?: () => boolean,
+  ): Promise<{ entries: ProductRankingEntry[]; reason: string; total?: number }>;
+  /** 品类树（平台不提供时返回空数组） */
+  fetchCategories(lang?: 'zh-CN' | 'en'): Promise<CategoryNode[]>;
 }
 
 /** 妙手适配器合约（规范 §5.2），实现见 modules/miaoshou/adapter.ts */
@@ -227,6 +325,12 @@ export interface ClientIdentity {
 export interface RuntimePublicState {
   connected: boolean;
   registered: boolean;
+  /** 是否已填写并通过认证 Token 校验 */
+  authorized: boolean;
+  /** 认证账号角色：普通用户/管理员 */
+  role: 'USER' | 'ADMIN' | null;
+  /** 认证账号显示名 */
+  display_name: string | null;
   client_id: string | null;
   active_batch_id: string | null;
   runner_stage: RunnerCheckpoint['runner_stage'];
@@ -244,6 +348,14 @@ export const ERROR_CODES = {
   ECHOTIK_PERMISSION_LIMIT: 'ECHOTIK_PERMISSION_LIMIT',
   ECHOTIK_BAD_RESPONSE: 'ECHOTIK_BAD_RESPONSE',
   ECHOTIK_NETWORK: 'ECHOTIK_NETWORK',
+  /** 未找到该来源平台的页面/标签页 */
+  RANKING_SOURCE_OFFLINE: 'RANKING_SOURCE_OFFLINE',
+  /** 页面未捕获到榜单接口请求（需先在页面切换一次筛选） */
+  RANKING_SOURCE_NO_CAPTURE: 'RANKING_SOURCE_NO_CAPTURE',
+  /** 来源平台登录失效 */
+  RANKING_SOURCE_UNAUTHORIZED: 'RANKING_SOURCE_UNAUTHORIZED',
+  /** 来源平台返回无法解析的内容 */
+  RANKING_SOURCE_BAD_RESPONSE: 'RANKING_SOURCE_BAD_RESPONSE',
   SERVER_UNREACHABLE: 'SERVER_UNREACHABLE',
   SERVER_UNAUTHORIZED: 'SERVER_UNAUTHORIZED',
   SERVER_ERROR: 'SERVER_ERROR',

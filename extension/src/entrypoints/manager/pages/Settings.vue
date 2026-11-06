@@ -15,7 +15,7 @@ import type { ClientMe } from '@/shared/types';
 import type { MessageMap } from '@/shared/types/messages';
 import { DEFAULT_MIAOSHOU_SELECTORS } from '@/modules/miaoshou/adapter';
 import { outboxPending, storageGet, storageSet } from '@/modules/storage';
-import { loadBehaviorConfig, loadExecConfig, refreshState, saveBehaviorConfig, saveExecConfig, store } from '../store';
+import { loadBehaviorConfig, loadExecConfig, refreshState, saveBehaviorConfig, saveExecConfig, setAuthToken, clearAuthToken, store } from '../store';
 import { classifyError, downloadText, formatTime } from '../utils';
 
 /** 适配器版本（与 modules/echotik/adapter capabilities 保持一致） */
@@ -27,8 +27,6 @@ const me = ref<ClientMe | null>(null);
 const localInfo = ref({ client_id: null as string | null, registered_at: null as string | null, server_url: '' });
 /** 远程地址编辑 */
 const serverUrlEdit = ref('');
-/** 重新绑定确认 */
-const confirmRebind = ref(false);
 /** 环境探测 */
 const env = ref<MessageMap['env.check']['res'] | null>(null);
 const envLoading = ref(false);
@@ -48,6 +46,51 @@ const errorText = ref<string | null>(null);
 /** 测试采集流程结果 */
 const pocResult = ref<string | null>(null);
 const pocRunning = ref(false);
+
+// ---------------- 认证 Token（服务器 auth_users 表内配置） ----------------
+/** 认证 Token 输入 */
+const authTokenEdit = ref('');
+/** 验证中 */
+const authBusy = ref(false);
+/** 切换结果 */
+const authResult = ref<string | null>(null);
+
+/**
+ * 保存并验证认证 Token；服务端按 token 返回角色（USER/ADMIN）
+ */
+async function saveAuth(): Promise<void> {
+  errorText.value = null;
+  const token = authTokenEdit.value.trim();
+  if (!token) {
+    errorText.value = '请输入认证 Token';
+    return;
+  }
+  authBusy.value = true;
+  try {
+    await setAuthToken(token);
+    await loadMe();
+    await refreshState();
+    const role = store.state?.role === 'ADMIN' ? '管理员' : '普通用户';
+    authResult.value = `认证成功：${role}（${store.state?.display_name ?? store.state?.client_id?.slice(0, 8) ?? ''}）`;
+    feedback.value = '认证 Token 已保存。';
+  } catch (e) {
+    authResult.value = null;
+    errorText.value = `认证失败：${classifyError(e).text}`;
+    authTokenEdit.value = store.authToken ?? '';
+  } finally {
+    authBusy.value = false;
+  }
+}
+
+/**
+ * 退出授权：清除本机认证 Token，插件回到未授权状态
+ */
+async function logoutAuth(): Promise<void> {
+  await clearAuthToken();
+  authTokenEdit.value = '';
+  authResult.value = '已退出授权。';
+  feedback.value = '认证 Token 已清除。';
+}
 
 /**
  * 复制文本到剪贴板
@@ -85,22 +128,6 @@ async function saveServerUrl(): Promise<void> {
   localInfo.value.server_url = url;
   feedback.value = '远程地址已保存，正在测试连接…';
   await testConnection();
-}
-
-/**
- * 重新绑定：清空本地凭证并触发重新注册（危险动作，二次确认）
- */
-async function rebind(): Promise<void> {
-  confirmRebind.value = false;
-  errorText.value = null;
-  try {
-    await sendMsg('client.register', { force: true });
-    await refreshState();
-    await loadMe();
-    feedback.value = '已重新注册/绑定。';
-  } catch (e) {
-    errorText.value = classifyError(e).text;
-  }
 }
 
 /**
@@ -274,6 +301,8 @@ onMounted(async () => {
     server_url: await storageGet('server_url'),
   };
   serverUrlEdit.value = localInfo.value.server_url;
+  // 回填当前认证 Token，便于切换或退出
+  authTokenEdit.value = (await storageGet('auth_token')) ?? '';
   exec.value = await loadExecConfig();
   behavior.value = await loadBehaviorConfig();
   await Promise.all([loadMe(), checkEnv(), loadTiktokTabs(), loadDataStats(), loadDebugLogs()]);
@@ -285,15 +314,35 @@ onMounted(async () => {
     <div v-if="errorText" class="alert-bar err">{{ errorText }}</div>
     <div v-if="feedback" class="alert-bar" style="background:#f0fdf4;border-color:#bbf7d0;color:#166534">{{ feedback }}</div>
 
+    <!-- 认证 Token 卡：服务端 auth_users 表配置，同一 token 跨浏览器共享数据 -->
+    <div class="card">
+      <h3>认证 Token
+        <span :class="store.state?.role === 'ADMIN' ? 'badge ok' : 'badge warn'">
+          {{ store.state?.role === 'ADMIN' ? '管理员' : store.state?.authorized ? '普通用户' : '未授权' }}
+        </span>
+      </h3>
+      <p class="small muted" style="margin-top: 0">
+        管理员可查看所有账号数据，普通用户只能查看自己的数据。
+      </p>
+      <div class="form-row">
+        <label>认证 Token</label>
+        <input v-model="authTokenEdit" type="password" placeholder="输入认证 Token" @keyup.enter="saveAuth" />
+        <button class="act" :disabled="authBusy" @click="saveAuth">{{ authBusy ? '验证中…' : '保存并验证' }}</button>
+        <button v-if="store.state?.authorized" class="act danger" @click="logoutAuth">退出授权</button>
+      </div>
+      <p v-if="authResult" class="small muted" style="margin-bottom: 0">{{ authResult }}</p>
+    </div>
+
     <!-- 客户端卡 -->
     <div class="card">
       <h3>客户端</h3>
       <div class="kv small" style="display: flex; margin-bottom: 6px">
         <b style="width: 88px; color: #6b7280">client_id</b>
-        <span class="mono">{{ localInfo.client_id ?? '未注册' }}</span>
+        <span class="mono">{{ localInfo.client_id ?? '未授权' }}</span>
         <button v-if="localInfo.client_id" class="link" @click="copyText(localInfo.client_id!)">复制</button>
       </div>
-      <div class="small">名称：{{ me?.display_name ?? '—' }}（名称在服务端注册信息中维护）</div>
+      <div class="small">名称：{{ me?.display_name ?? store.state?.display_name ?? '—' }}</div>
+      <div class="small">角色：{{ store.state?.role === 'ADMIN' ? '管理员（可看全部）' : '普通用户（仅看自己）' }}</div>
       <div class="small">扩展版本：{{ me?.extension_version ?? ADAPTER_VERSION }}</div>
       <div class="small">注册时间：{{ formatTime(localInfo.registered_at ?? me?.registered_at) }}</div>
       <div class="small">最后同步：{{ formatTime(me?.last_seen_at) }}</div>
@@ -302,9 +351,6 @@ onMounted(async () => {
         <input v-model="serverUrlEdit" placeholder="http://localhost:8001" />
         <button class="act" @click="saveServerUrl">保存</button>
         <button class="act" @click="testConnection">连接测试</button>
-      </div>
-      <div class="btn-row">
-        <button class="act danger" @click="confirmRebind = true">重新绑定</button>
       </div>
     </div>
 
@@ -435,17 +481,6 @@ onMounted(async () => {
           <span style="color: #38bdf8">[{{ l.scope }}]</span>
           <span>{{ l.msg }}</span>
           <span v-if="l.data" style="color: #a5b4fc">{{ l.data }}</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- 重新绑定二次确认 -->
-    <div v-if="confirmRebind" class="confirm-mask" @click.self="confirmRebind = false">
-      <div class="confirm-box">
-        <p>重新绑定将清空本地客户端凭证并重新注册。远程任务与数据不受影响。确认继续？</p>
-        <div class="btn-row" style="justify-content: flex-end">
-          <button class="act" @click="confirmRebind = false">取消</button>
-          <button class="act danger" @click="rebind">确认重新绑定</button>
         </div>
       </div>
     </div>

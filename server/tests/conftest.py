@@ -53,7 +53,13 @@ def register_client(client: TestClient, install_id: str = "install-test-001") ->
     return {"client_id": data["client_id"], "token": data["client_token"], "headers": headers}
 
 
-def make_snapshot_with_entries(client: TestClient, headers: dict, n: int = 3, request_id: str = "req-snap-1") -> str:
+def make_snapshot_with_entries(
+    client: TestClient,
+    headers: dict,
+    n: int = 3,
+    request_id: str = "req-snap-1",
+    external_prefix: str = "17000",
+) -> str:
     """创建含 n 条明细的榜单快照并返回 snapshot_id。"""
     resp = client.post(
         "/v1/rank-snapshots",
@@ -70,10 +76,10 @@ def make_snapshot_with_entries(client: TestClient, headers: dict, n: int = 3, re
     snapshot_id = resp.json()["data"]["snapshot_id"]
     entries = [
         {
-            "external_product_id": f"17000{i}",
+            "external_product_id": f"{external_prefix}{i}",
             "title": f"测试商品{i}",
             "shop_name": "测试店铺",
-            "detail_url": f"https://www.tiktok.com/shop/pdp/17000{i}",
+            "detail_url": f"https://www.tiktok.com/shop/pdp/{external_prefix}{i}",
             "rank_position": i + 1,
             "sales": 100 - i,
         }

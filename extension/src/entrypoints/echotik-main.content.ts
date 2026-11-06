@@ -43,17 +43,42 @@ export default defineContentScript({
     async function handleRequest(req: PageBridgeRequest): Promise<void> {
       try {
         const url = new URL(req.path, window.location.origin);
-        for (const [k, v] of Object.entries(req.params ?? {})) {
+        // region 只用于构造页面 API 的 x-region header，绝不能出现在 URL 中。
+        const { __echotik_region: requestedRegion, ...queryParams } = req.params ?? {};
+        for (const [k, v] of Object.entries(queryParams)) {
           url.searchParams.set(k, String(v));
         }
+        const region = typeof requestedRegion === 'string' && requestedRegion ? requestedRegion : 'US';
+        const currencyByRegion: Record<string, string> = {
+          US: 'USD', MX: 'MXN', BR: 'BRL', VN: 'VND', TH: 'THB', PH: 'PHP', MY: 'MYR',
+          ID: 'IDR', SG: 'SGD', JP: 'JPY', GB: 'GBP', ES: 'EUR', DE: 'EUR', IT: 'EUR',
+          FR: 'EUR', GR: 'EUR', BE: 'EUR', CZ: 'CZK', PL: 'PLN', PT: 'EUR', AT: 'EUR',
+          HU: 'HUF', NL: 'EUR', IE: 'EUR',
+        };
+        // EchoTik 页面不是只依赖 Cookie：榜单 API 还校验 Bearer token、用户 ID
+        // 与区域头。它们均来自该页面的 localStorage，只在 MAIN world 内读取并
+        // 直接用于同源请求，不会回传给扩展其他上下文。
+        const token = localStorage.getItem('token');
+        let userId: string | undefined;
+        try {
+          const user = JSON.parse(localStorage.getItem('userInfo') ?? '{}') as { user_id?: string | number };
+          if (user.user_id != null) userId = String(user.user_id);
+        } catch {
+          // 登录信息异常时仍发请求，由服务端返回其标准未授权响应。
+        }
+        const headers: Record<string, string> = {
+          Accept: 'application/json, text/plain, */*',
+          'x-lang': req.lang === 'en' ? 'en' : 'zh-CN',
+          'x-region': region,
+          'x-currency': currencyByRegion[region] ?? 'USD',
+          'x-secondary-currency': 'CNY',
+        };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        if (userId) headers['X-User-Id'] = userId;
         const resp = await fetch(url.toString(), {
           method: 'GET',
           credentials: 'include',
-          // x-lang: zh-CN 让 EchoTik 接口返回中文字段（类目 label、商品 category 等），与 EchoTik 中文站点一致
-          headers:
-            req.lang === 'en'
-              ? { Accept: 'application/json' }
-              : { Accept: 'application/json', 'x-lang': 'zh-CN' },
+          headers,
         });
         if (resp.status === 401 || resp.status === 403) {
           post({ type: PAGE_BRIDGE.RESPONSE, nonce: req.nonce, ok: false, status: resp.status, error: 'UNAUTHORIZED' });

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api import schemas
-from app.api.deps import ok, require_client
+from app.api.deps import Identity, ok, require_client, require_identity
 from app.db import get_db
 from app.models import CollectorClient
 from app.services import batch_service, lease_service
@@ -117,12 +117,13 @@ def list_attempts(
     date_to: datetime | None = None,
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=20),
-    client: CollectorClient = Depends(require_client),
+    identity: Identity = Depends(require_identity),
     db: Session = Depends(get_db),
 ):
-    """采集尝试日志按时间/批次/任务/结果/错误码筛选分页。"""
+    """采集尝试日志筛选分页；普通账号仅可见自身批次记录，管理员可见全量。"""
     if per_page not in (20, 50, 100):
         per_page = 20
+    scope_client_id = None if identity.role == "ADMIN" else identity.client.client_id
     items, total = lease_service.list_attempts(
         db,
         batch_id=batch_id,
@@ -131,6 +132,7 @@ def list_attempts(
         error_code=error_code,
         date_from=date_from,
         date_to=date_to,
+        scope_client_id=scope_client_id,
         page=page,
         per_page=per_page,
     )

@@ -89,7 +89,7 @@ Chrome → `chrome://extensions` → 开发者模式 → 加载已解压的扩�
 | 单商品状态机（LEASED→NAVIGATING→PAGE_READY→SUBMITTING→SUBMITTED→WAITING_VERIFICATION） | ✅ | [state-machine.ts](extension/src/modules/runner/state-machine.ts)、[background.ts](extension/src/entrypoints/background.ts) |
 | 运行器串行锁 + 幂等状态转换（修复 tabs.onUpdated / pageReady 重入导致的非法跳变） | ✅ | [background.ts](extension/src/entrypoints/background.ts) |
 | 地区不可用（“此国家或地区未提供的商品”）自动暂停批次 | ✅ | [tiktok.content.ts](extension/src/entrypoints/tiktok.content.ts)、[background.ts](extension/src/entrypoints/background.ts) |
-| 妙手「采集此商品」按钮适配：不可见字符（U+200E 等）归一化、开放 shadow root 深度查找 | 🟡 | [adapter.ts](extension/src/modules/miaoshou/adapter.ts) |
+| 妙手「采集此商品」按钮适配：不可见字符归一化、嵌套 `earth-wxt-button` 目标解析、单次点击提交 | ✅ | [adapter.ts](extension/src/modules/miaoshou/adapter.ts) |
 | 验证/访问限制识别（challenge）与人工介入恢复 | 🟡 | [detector.ts](extension/src/modules/challenge/detector.ts)、[tiktok.content.ts](extension/src/entrypoints/tiktok.content.ts) |
 | 妙手采集成功确认 | 🟡 | 无授权核对途径时保持 `UNKNOWN`，不宣称无人值守批量导入 |
 | 浮动快捷入口（圆形 icon + 扇形菜单 + 进度 + 悬停收起） | ✅ | [floating-widget.content.ts](extension/src/entrypoints/floating-widget.content.ts) |
@@ -107,8 +107,8 @@ Chrome → `chrome://extensions` → 开发者模式 → 加载已解压的扩�
 
 ### P0（阻塞端到端验收）
 
-- **确认真实妙手插件按钮的 DOM 位置**：正常 DOM / 开放 shadow root / 跨域 iframe / closed shadow root。当前选择器为 `0.1.0-poc-unverified` 候选探针；探测失败时证据会输出“页面是否含采集字样 + shadow 宿主数 + iframe 域名”。
-- **端到端真实跑通一次**：US 商品 → TikTok 详情页 → 点击「采集此商品」→ 妙手 ERP 出现该商品并回执成功。
+- **持续兼容妙手插件界面变化**：已在真实页面确认入口位于普通 DOM 的 `.earth-wxt-collect-panel-button-group > earth-wxt-button`；探测失败时证据会输出“页面是否含采集字样 + shadow 宿主数 + iframe 域名”。
+- **扩展最终 ERP 成功确认**：已验证 US 商品 → TikTok 详情页 → 点击「采集此商品」可进入妙手公用采集箱；仍需授权回执，才能自动标记最终成功。
 - **妙手成功确认机制**：若无法读取 ERP 授权回执，需补人工确认入口或核对方案，保持 `UNKNOWN` 语义。
 - **验证 challenge 误判修复**：隐藏 captcha 容器已按可见性过滤（`last_probe_evidence` 写入 checkpoint），需真机确认 `runner_stage` 能进入 `PAGE_READY/SUBMITTING`。
 

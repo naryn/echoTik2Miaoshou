@@ -84,7 +84,7 @@ export async function dlog(scope: string, msg: string, data?: unknown): Promise<
   let extra: string | undefined;
   if (data !== undefined) {
     try {
-      extra = (typeof data === 'string' ? data : JSON.stringify(data)).slice(0, 200);
+      extra = (typeof data === 'string' ? data : JSON.stringify(data)).slice(0, 480);
     } catch {
       extra = String(data).slice(0, 200);
     }
