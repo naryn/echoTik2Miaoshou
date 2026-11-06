@@ -17,11 +17,11 @@ def test_ranking_presets_are_enveloped_and_client_scoped(client):
     assert body["error"] is None
     assert body["data"]["name"] == "墨西哥日榜"
 
-    listed = client.get("/v1/ranking-presets", headers=first["headers"])
+    listed = client.get("/v1/ranking-presets?source_platform=ECHOTIK", headers=first["headers"])
     assert listed.status_code == 200
     assert listed.json()["error"] is None
     assert [item["name"] for item in listed.json()["data"]["items"]] == ["墨西哥日榜"]
 
-    other = client.get("/v1/ranking-presets", headers=second["headers"])
+    other = client.get("/v1/ranking-presets?source_platform=ECHOTIK", headers=second["headers"])
     assert other.status_code == 200
     assert other.json()["data"] == {"items": []}

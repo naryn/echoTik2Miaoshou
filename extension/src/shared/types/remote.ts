@@ -70,6 +70,9 @@ export const BatchDetailSchema = z.object({
       skipped: z.number().optional(),
       unknown: z.number().optional(),
       pending: z.number().optional(),
+      /** 服务端 batch_summary 的原始状态聚合（如 SUCCESS / FAILED） */
+      by_status: z.record(z.number()).optional(),
+      terminal: z.number().optional(),
     })
     .partial()
     .optional(),
@@ -182,6 +185,9 @@ export const BatchSummarySchema = z
     unknown: z.number().optional(),
     pending: z.number().optional(),
     total: z.number().optional(),
+    /** 服务端 batch_summary 的原始状态聚合（如 SUCCESS / FAILED） */
+    by_status: z.record(z.number()).optional(),
+    terminal: z.number().optional(),
   })
   .partial();
 export type BatchSummary = z.infer<typeof BatchSummarySchema>;
@@ -282,6 +288,7 @@ export type AuthMe = z.infer<typeof AuthMeSchema>;
 export const RankingPresetSchema = z.object({
   preset_id: z.string(),
   name: z.string(),
+  source_platform: z.enum(['ECHOTIK', 'FASTMOSS']).or(z.string()),
   query_json: z.record(z.unknown()),
   created_at: z.string().nullable().optional(),
   updated_at: z.string().nullable().optional(),

@@ -38,6 +38,43 @@ def list_clients(db: Session = Depends(get_db)):
     return ok({"items": [schemas.client_out(c) for c in items]})
 
 
+@router.get("/rank-snapshots")
+def list_rank_snapshots(
+    region: str | None = None,
+    ranking_type: str | None = None,
+    category_id: str | None = None,
+    status: str | None = None,
+    source_platform: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=20),
+    db: Session = Depends(get_db),
+):
+    """管理员跨客户端读取全部历史榜单快照（只读）。"""
+    size = _per_page(per_page)
+    items, total = rank_service.list_snapshots(
+        db,
+        region=region,
+        ranking_type=ranking_type,
+        category_id=category_id,
+        status=status,
+        source_platform=source_platform,
+        date_from=date_from,
+        date_to=date_to,
+        page=page,
+        per_page=size,
+    )
+    return ok(
+        {
+            "items": [schemas.snapshot_out(snapshot) for snapshot in items],
+            "total": total,
+            "page": page,
+            "per_page": size,
+        }
+    )
+
+
 @router.get("/batches")
 def list_batches(
     client_id: str | None = None,

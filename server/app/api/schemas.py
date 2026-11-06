@@ -73,9 +73,10 @@ class SnapshotCreateRequest(BaseModel):
 
 
 class RankingPresetUpsertRequest(BaseModel):
-    """创建或按名称覆盖账号级榜单筛选预设。"""
+    """创建或按名称覆盖账号及渠道隔离的榜单筛选预设。"""
 
     name: str = Field(min_length=1, max_length=128)
+    source_platform: SourcePlatform = Field(default=DEFAULT_SOURCE_PLATFORM, max_length=16)
     query_json: dict
 
 

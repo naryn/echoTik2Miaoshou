@@ -220,10 +220,17 @@ export default defineBackground(() => {
     const identity = await loadClientIdentity();
     if (!identity.client_id) return; // 未注册态：等待注册
     const checkpoint = await loadCheckpoint();
-    if (!checkpoint.active_batch_id || !checkpoint.runner_stage || checkpoint.runner_stage === 'IDLE') {
+    if (!checkpoint.active_batch_id || !checkpoint.runner_stage) {
       return; // 无活动批次
     }
     if (checkpoint.paused) return; // 用户暂停：不自动推进
+
+    if (checkpoint.runner_stage === 'IDLE') {
+      // 空闲检查点仍绑定批次时，主动领取下一件；若批次已终态，claimAndStart
+      // 会清理 active_batch_id，顶部“当前批次”随之消失。
+      await scheduleClaimNext(checkpoint.active_batch_id);
+      return;
+    }
 
     let active: Awaited<ReturnType<ApiClient['activeTask']>> = null;
     try {
@@ -729,6 +736,22 @@ export default defineBackground(() => {
     const adapter = createRankingAdapter(source, createRankingTransports());
     const identity = await loadClientIdentity();
     if (!identity.client_id) throw new Error(ERROR_CODES.NOT_REGISTERED);
+    const pageSelection = await adapter.readCurrentPageSelection(0);
+    if (!pageSelection.region) {
+      throw Object.assign(
+        new Error('未能从当前页面顶部国家/站点选择器读取站点，请先在来源页面选择国家后重试'),
+        { code: ERROR_CODES.RANKING_SOURCE_BAD_RESPONSE },
+      );
+    }
+    // 平台页面顶部的国家选择器是唯一真值，不允许面板或预设的旧站点覆盖它。
+    query = { ...query, region: pageSelection.region };
+
+    // FastMoss 容易在密集接口调用前触发滑块。每次采集先刷新榜单页并等待
+    // 人工验证完成，再创建快照、请求 API，避免产生 0 条 FAILED 快照。
+    if (source === 'FASTMOSS') {
+      const ready = await refreshFastMossAndAwaitVerification();
+      if (!ready) return;
+    }
 
     const snapshot = await getApi().createSnapshot({
       query,
@@ -768,8 +791,11 @@ export default defineBackground(() => {
       await getApi().finishSnapshot(snapshot.snapshot_id, 'FAILED', 0).catch(() => undefined);
       throw e;
     }
-    const finalStatus =
-      uploadFailed || reason === 'CANCELLED' || reason === 'PERMISSION_LIMIT' ? 'PARTIAL' : 'COMPLETED';
+    const finalStatus = reason.startsWith('FAILED_')
+      ? 'FAILED'
+      : uploadFailed || reason === 'CANCELLED' || reason === 'PERMISSION_LIMIT' || reason === 'WAITING_VERIFICATION'
+        ? 'PARTIAL'
+        : 'COMPLETED';
     await getApi().finishSnapshot(snapshot.snapshot_id, finalStatus, uploaded).catch(() => undefined);
     rankingProgress = { ...rankingProgress, running: false, done: true, reason: uploadFailed ? 'UPLOAD_PARTIAL' : reason, fetched: entries.length };
     await broadcastState();
@@ -987,6 +1013,9 @@ export default defineBackground(() => {
         }
         return sendToEchoTikTab(tab.id, { path, params, lang });
       },
+      async readPageSelection() {
+        return readRankingPageSelection('ECHOTIK').catch(() => ({}) as Partial<RankingQuery>);
+      },
     };
   }
 
@@ -1012,9 +1041,16 @@ export default defineBackground(() => {
           .catch(() => [] as CapturedApiCall[]);
       },
       async readPageSelection() {
+        return readRankingPageSelection('FASTMOSS').catch(() => ({}) as Partial<RankingQuery>);
+      },
+      async checkChallenge() {
         const tab = await findRankingTab('FASTMOSS');
-        if (!tab?.id) return {};
-        return sendMsg('fastmoss.readPageSelection', undefined, tab.id).catch(() => ({}) as Partial<RankingQuery>);
+        if (!tab?.id) {
+          throw Object.assign(new Error('未找到 FastMoss 页面，无法检查滑块验证'), {
+            code: ERROR_CODES.RANKING_SOURCE_OFFLINE,
+          });
+        }
+        return sendMsg('fastmoss.checkChallenge', undefined, tab.id);
       },
     };
   }
@@ -1024,6 +1060,62 @@ export default defineBackground(() => {
    */
   function createRankingTransports(): RankingTransports {
     return { echotik: createEchoTikTransport(), fastmoss: createFastMossTransport() };
+  }
+
+  const FASTMOSS_SETTLE_MS = 2_000;
+  const FASTMOSS_VERIFICATION_WAIT_MS = 5 * 60_000;
+
+  /**
+   * 刷新 FastMoss 榜单页，等待可能出现的滑块验证被用户完成。
+   * 仅轮询页面状态，不模拟或绕过验证；超时后保留“等待验证”状态供用户重试。
+   */
+  async function refreshFastMossAndAwaitVerification(): Promise<boolean> {
+    const tab = await findRankingTab('FASTMOSS');
+    if (!tab?.id) {
+      throw Object.assign(new Error('未找到 FastMoss 榜单页，请先打开后再采集'), {
+        code: ERROR_CODES.RANKING_SOURCE_OFFLINE,
+      });
+    }
+    rankingProgress = { ...rankingProgress, reason: 'REFRESHING_FASTMOSS' };
+    await broadcastState();
+    await browser.tabs.reload(tab.id);
+    await waitTabLoaded(tab.id, 30_000);
+
+    const startedAt = Date.now();
+    let clearSince: number | null = null;
+    while (Date.now() - startedAt < FASTMOSS_VERIFICATION_WAIT_MS) {
+      let state: 'CLEAR' | 'CHALLENGE' | 'ACCESS_RESTRICTED';
+      try {
+        state = (await sendMsg('fastmoss.checkChallenge', undefined, tab.id)).state;
+      } catch (e) {
+        if (!isMissingReceiver(e)) throw e;
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        continue;
+      }
+      if (state === 'CLEAR') {
+        // 要连续保持一段时间无验证，避免刷新或刚通过滑块后立即发 API 又触发挑战。
+        clearSince ??= Date.now();
+        if (Date.now() - clearSince < FASTMOSS_SETTLE_MS) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          continue;
+        }
+        rankingProgress = { ...rankingProgress, reason: '' };
+        await broadcastState();
+        return true;
+      }
+      clearSince = null;
+      rankingProgress = { ...rankingProgress, reason: 'WAITING_VERIFICATION' };
+      await broadcastState();
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+    rankingProgress = {
+      ...rankingProgress,
+      running: false,
+      done: true,
+      reason: 'WAITING_VERIFICATION',
+    };
+    await broadcastState();
+    return false;
   }
 
   /**
@@ -1049,6 +1141,41 @@ export default defineBackground(() => {
           lastError = err;
           if (!isMissingReceiver(err)) throw err;
           await new Promise((r) => setTimeout(r, 600));
+        }
+      }
+      throw lastError;
+    }
+  }
+
+  /**
+   * 读取来源页面筛选。扩展重载后，已打开标签页可能尚未注入 content script；
+   * 此处统一刷新、等待并重试，避免面板直连标签页时暴露“Receiving end”错误。
+   */
+  async function readRankingPageSelection(source: RankingSource): Promise<Partial<RankingQuery>> {
+    const tab = source === 'ECHOTIK' ? await findEchoTikTab() : await findRankingTab(source);
+    if (!tab?.id) {
+      const meta = sourceMeta(source);
+      throw Object.assign(new Error(`未找到 ${meta.label} 页面，请先打开 ${meta.boardUrl}`), {
+        code: ERROR_CODES.RANKING_SOURCE_OFFLINE,
+      });
+    }
+    const read = () => source === 'ECHOTIK'
+      ? sendMsg('echotik.readPageSelection', undefined, tab.id!)
+      : sendMsg('fastmoss.readPageSelection', undefined, tab.id!);
+    try {
+      return await read();
+    } catch (e) {
+      if (!isMissingReceiver(e)) throw e;
+      await browser.tabs.reload(tab.id);
+      await waitTabLoaded(tab.id);
+      let lastError: unknown = e;
+      for (let i = 0; i < 6; i++) {
+        try {
+          return await read();
+        } catch (err) {
+          lastError = err;
+          if (!isMissingReceiver(err)) throw err;
+          await new Promise((resolve) => setTimeout(resolve, 600));
         }
       }
       throw lastError;
@@ -1184,24 +1311,34 @@ export default defineBackground(() => {
         return { started: payload.queries.length };
       }),
       'ranking.presetBatchProgress': wrapHandler<'ranking.presetBatchProgress'>(async () => presetBatchProgress),
-      'rankingPreset.list': wrapHandler<'rankingPreset.list'>(async () => getApi().listRankingPresets()),
-      'rankingPreset.save': wrapHandler<'rankingPreset.save'>(async (payload) => getApi().saveRankingPreset(payload.name, payload.query as unknown as Record<string, unknown>)),
+      'rankingPreset.list': wrapHandler<'rankingPreset.list'>(async (payload) => getApi().listRankingPresets(payload.source)),
+      'rankingPreset.save': wrapHandler<'rankingPreset.save'>(async (payload) => getApi().saveRankingPreset(payload.name, payload.source, payload.query as unknown as Record<string, unknown>)),
       'rankingPreset.delete': wrapHandler<'rankingPreset.delete'>(async (payload) => getApi().deleteRankingPreset(payload.preset_id)),
       'ranking.getProgress': wrapHandler<'ranking.getProgress'>(async () => rankingProgress),
       'ranking.cancelCollect': wrapHandler<'ranking.cancelCollect'>(async () => {
         rankingCancelled = true;
         return { cancelled: true as const };
       }),
+      'ranking.readPageSelection': wrapHandler<'ranking.readPageSelection'>(async (payload) =>
+        readRankingPageSelection(payload.source)),
       'ranking.preview': wrapHandler<'ranking.preview'>(async (payload) => {
         // 预览：只抓首页并归一化，不创建远程快照（规范 §3.3 预览不持久化）
         const source = resolveSource(payload.query);
         const adapter = createRankingAdapter(source, createRankingTransports());
-        const page = await adapter.fetchRankingPage(payload.query, undefined, 1);
-        const startRank = Math.max(1, payload.query.startRank || 1);
+        const pageSelection = await adapter.readCurrentPageSelection(0);
+        if (!pageSelection.region) {
+          throw Object.assign(
+            new Error('未能从当前页面顶部国家/站点选择器读取站点，请先在来源页面选择国家后重试'),
+            { code: ERROR_CODES.RANKING_SOURCE_BAD_RESPONSE },
+          );
+        }
+        const query = { ...payload.query, region: pageSelection.region };
+        const page = await adapter.fetchRankingPage(query, undefined, 1);
+        const startRank = Math.max(1, query.startRank || 1);
         const items = page.records
           .map((raw, i) => {
             try {
-              return adapter.normalize(raw, payload.query, startRank + i);
+              return adapter.normalize(raw, query, startRank + i);
             } catch {
               return null; // 非法条目跳过（规范 §4.3）
             }
@@ -1225,6 +1362,12 @@ export default defineBackground(() => {
           source === 'FASTMOSS'
             ? await sendMsg('fastmoss.readPageSelection', undefined, tab.id).catch(() => ({}) as Partial<RankingQuery>)
             : await sendMsg('echotik.readPageSelection', undefined, tab.id).catch(() => ({}) as Partial<RankingQuery>);
+        if (!selection.region) {
+          throw Object.assign(
+            new Error('未能从当前页面顶部国家/站点选择器读取站点，请先在来源页面选择国家后重试'),
+            { code: ERROR_CODES.RANKING_SOURCE_BAD_RESPONSE },
+          );
+        }
         const query: RankingQuery = {
           source,
           region: 'MX',
@@ -1238,6 +1381,8 @@ export default defineBackground(() => {
           ...selection,
           ...(payload?.overrides ?? {}),
         } as RankingQuery;
+        // 覆盖项不得改写页面顶部当前站点。
+        query.region = selection.region;
         void runRankingCollect(query).catch((e) => {
           rankingProgress = { ...rankingProgress, running: false, done: true, reason: (e as Error).message };
         });
@@ -1270,6 +1415,24 @@ export default defineBackground(() => {
           if (cache?.items?.length) {
             return { items: cache.items, cached: true, fetched_at: cache.fetched_at };
           }
+          throw e;
+        }
+      }),
+      'ranking.getCategories': wrapHandler<'ranking.getCategories'>(async (payload) => {
+        const source = payload.source;
+        const cacheKey = source === 'FASTMOSS' ? 'fastmoss_category_cache' : 'category_cache';
+        const cache = await storageGet(cacheKey);
+        if (cache && !payload.force && (source !== 'ECHOTIK' || !isEnglishCategoryTree(cache.items))) {
+          return { items: cache.items, cached: true, fetched_at: cache.fetched_at };
+        }
+        try {
+          const adapter = createRankingAdapter(source, createRankingTransports());
+          const items = await adapter.fetchCategories();
+          const fetched_at = new Date().toISOString();
+          await storageSet(cacheKey, { items, fetched_at });
+          return { items, cached: false, fetched_at };
+        } catch (e) {
+          if (cache?.items?.length) return { items: cache.items, cached: true, fetched_at: cache.fetched_at };
           throw e;
         }
       }),
@@ -1362,6 +1525,9 @@ export default defineBackground(() => {
       }),
       'admin.listProducts': wrapHandler<'admin.listProducts'>(async (payload) =>
         getApi().adminListProducts(payload ?? {}),
+      ),
+      'admin.listSnapshots': wrapHandler<'admin.listSnapshots'>(async (payload) =>
+        getApi().adminListSnapshots(payload ?? {}),
       ),
       'outbox.flush': wrapHandler<'outbox.flush'>(async () => {
         // 手动触发 outbox 补传（复用恢复流程的幂等补传逻辑）
@@ -1573,10 +1739,22 @@ export default defineBackground(() => {
     const cp = await loadCheckpoint();
     let connected = false;
     let progress: RuntimePublicState['progress'] = null;
+    let activeBatchId = cp.active_batch_id;
+    let runnerStage = cp.runner_stage;
+    let paused = cp.paused;
+    let currentProductTitle = cp.product?.external_product_id ?? null;
     if (authorized && cp.active_batch_id) {
       const batch = await getApi().getBatch(cp.active_batch_id).catch(() => null);
       if (batch) {
         connected = true;
+        if (['COMPLETED', 'COMPLETED_WITH_ERRORS', 'CANCELLED'].includes(batch.status)) {
+          // 服务器已终态时不再把残留 checkpoint 渲染成“当前批次”；
+          // reconcile 会在下一轮彻底清理存储中的 active_batch_id。
+          activeBatchId = null;
+          runnerStage = 'IDLE';
+          paused = false;
+          currentProductTitle = null;
+        }
         const s = batch.summary ?? {};
         const done = (s.success ?? 0) + (s.failed ?? 0) + (s.skipped ?? 0) + (s.unknown ?? 0);
         progress = batch.total != null ? { done, total: batch.total } : null;
@@ -1591,14 +1769,14 @@ export default defineBackground(() => {
       role,
       display_name: displayName ?? null,
       client_id: identity.client_id,
-      active_batch_id: cp.active_batch_id,
-      runner_stage: cp.runner_stage,
-      paused: cp.paused,
-      waiting_verification: cp.runner_stage === 'WAITING_VERIFICATION',
+      active_batch_id: activeBatchId,
+      runner_stage: runnerStage,
+      paused,
+      waiting_verification: runnerStage === 'WAITING_VERIFICATION',
       progress: rankingProgress.running
         ? { done: rankingProgress.fetched, total: rankingProgress.limit }
         : progress,
-      current_product_title: cp.product?.external_product_id ?? null,
+      current_product_title: currentProductTitle,
       last_error: null,
     };
   }

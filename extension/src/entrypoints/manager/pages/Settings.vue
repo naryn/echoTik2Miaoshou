@@ -342,7 +342,7 @@ onMounted(async () => {
         <button v-if="localInfo.client_id" class="link" @click="copyText(localInfo.client_id!)">复制</button>
       </div>
       <div class="small">名称：{{ me?.display_name ?? store.state?.display_name ?? '—' }}</div>
-      <div class="small">角色：{{ store.state?.role === 'ADMIN' ? '管理员（可看全部）' : '普通用户（仅看自己）' }}</div>
+      <div class="small">角色：{{ store.state?.role === 'ADMIN' ? '管理员' : '普通用户（仅看自己）' }}</div>
       <div class="small">扩展版本：{{ me?.extension_version ?? ADAPTER_VERSION }}</div>
       <div class="small">注册时间：{{ formatTime(localInfo.registered_at ?? me?.registered_at) }}</div>
       <div class="small">最后同步：{{ formatTime(me?.last_seen_at) }}</div>

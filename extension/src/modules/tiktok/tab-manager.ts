@@ -43,6 +43,22 @@ export function extractProductIdFromUrl(url: string): string | null {
  * @param fallback 服务端返回的详情 URL
  */
 export function resolveDetailUrl(productId: string, fallback?: string | null): string {
+  // 兼容已入库的 FastMoss 旧链接：/view/product/{id}?region=US&local=en。
+  // 直接改写为当前可用的 PDP 路由，避免任务仍打开旧版查看页。
+  if (fallback) {
+    try {
+      const url = new URL(fallback);
+      const legacy = url.hostname === 'shop.tiktok.com'
+        && url.pathname.match(/^\/view\/product\/(\d{6,})$/);
+      if (legacy) {
+        const market = (url.searchParams.get('region') ?? 'us').toLowerCase();
+        const safeMarket = /^[a-z]{2}$/.test(market) ? market : 'us';
+        return `https://shop.tiktok.com/${safeMarket}/pdp/${legacy[1]}?source=product_detail`;
+      }
+    } catch {
+      // 下方统一按原有兜底处理。
+    }
+  }
   if (fallback && isTikTokShopUrl(fallback)) return fallback;
   return `https://www.tiktok.com/shop/pdp/${productId}`;
 }

@@ -8,7 +8,6 @@
  */
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { browser } from 'wxt/browser';
 import { sendMsg } from '@/shared/messaging';
 import { computePeriodStartDate } from '@/shared/types';
 import type {
@@ -59,6 +58,7 @@ const VARIANT_OPTIONS = [
   { value: 'top-sold', label: '热销榜' },
   { value: 'hot-sell', label: '热推榜' },
   { value: 'news-burst', label: '新品榜' },
+  { value: 'video-rank', label: '带货视频榜' },
   { value: 'products', label: '商品库' },
 ] as const;
 
@@ -110,6 +110,7 @@ const ORDER_FIELDS_BY_VARIANT: Record<string, string[]> = {
 interface FilterForm {
   source: RankingSource;
   region: string;
+  sellerType: '' | 'cross-border' | 'local';
   cat1: string;
   cat2: string;
   cat3: string;
@@ -150,6 +151,7 @@ function createFilterForm(source: RankingSource, perPage: number, maxPages: numb
   return {
     source,
     region: 'MX',
+    sellerType: '',
     cat1: '',
     cat2: '',
     cat3: '',
@@ -222,7 +224,7 @@ const currentSourceMeta = computed(() => sourceTabs.value.find((s) => s.id === f
 /** 各来源平台支持的榜单变体（FastMoss：畅销/热销/新品榜单 + 商品库搜索列表） */
 const VARIANT_BY_SOURCE: Record<RankingSource, string[]> = {
   ECHOTIK: ['top-sold', 'hot-sell', 'news-burst', 'products'],
-  FASTMOSS: ['top-sold', 'hot-sell', 'news-burst', 'products'],
+  FASTMOSS: ['top-sold', 'hot-sell', 'news-burst', 'video-rank'],
 };
 
 /** 当前平台可用的榜单变体选项 */
@@ -235,7 +237,7 @@ const FAST_MOSS_VARIANT_LABELS: Record<string, string> = {
   'top-sold': '销量榜',
   'hot-sell': '热推榜',
   'news-burst': '新品榜',
-  products: '商品库',
+  'video-rank': '带货视频榜',
 };
 
 /**
@@ -264,14 +266,18 @@ const cat3Options = computed(() => cat2Options.value.find((c) => c.value === for
 const sortOptions = computed(() =>
   form.value.source === 'FASTMOSS' ? [] : (ORDER_FIELDS_BY_VARIANT[form.value.variant] ?? []),
 );
+const isDateFreeFastMossVariant = computed(() => form.value.source === 'FASTMOSS' && form.value.variant === 'video-rank');
 
 /**
- * 切换来源 Tab：各平台表单参数互相独立，切回时保留原配置；仅按需加载 EchoTik 类目
+ * 切换来源 Tab：各平台表单与分类缓存互相独立，切回时保留原配置。
  * @param id 目标来源平台
  */
 function switchSource(id: RankingSource): void {
   activeSource.value = id;
-  if (id === 'ECHOTIK' && categories.value.length === 0) loadCategories();
+  void loadCategories();
+  void loadPresets();
+  // 国家/站点没有面板内的可编辑值；切换来源时立即以该来源页顶部设置覆盖旧显示。
+  void syncPageSelection(id, true).catch(() => undefined);
 }
 
 /**
@@ -310,6 +316,8 @@ const REASON_TEXT: Record<string, string> = {
   PERMISSION_LIMIT: '会员/访客权限限制，已保存已抓部分（PARTIAL）',
   MAX_PAGES: '达到页数上限',
   UPLOAD_PARTIAL: '部分上传失败（标 PARTIAL）',
+  REFRESHING_FASTMOSS: '正在刷新 FastMoss 榜单页并检查验证状态',
+  WAITING_VERIFICATION: 'FastMoss 出现滑块/人机验证；请在 FastMoss 页面完成验证后重新获取',
 };
 
 // ---------------- 运行/预览/预设状态 ----------------
@@ -384,6 +392,7 @@ function buildQuery(): RankingQuery {
     source: f.source,
     region: f.region,
     categoryId,
+    sellerType: f.sellerType || undefined,
     rankingVariant: f.variant,
     period: { type: f.timeType, startDate },
     sortBy: f.sortBy || undefined,
@@ -399,17 +408,10 @@ function buildQuery(): RankingQuery {
  * @param force 强制刷新缓存
  */
 async function loadCategories(force = false): Promise<void> {
-  // FastMoss 类目树暂未接入（参数结构待验证），选中该平台时不请求
-  if (form.value.source === 'FASTMOSS') {
-    categories.value = [];
-    catLoading.value = false;
-    catError.value = null;
-    return;
-  }
   catLoading.value = true;
   catError.value = null;
   try {
-    const r = await sendMsg('echotik.getCategories', { force });
+    const r = await sendMsg('ranking.getCategories', { source: form.value.source, force });
     categories.value = r.items;
   } catch (e) {
     catError.value = classifyError(e).text;
@@ -421,42 +423,36 @@ async function loadCategories(force = false): Promise<void> {
 /**
  * 读取当前榜单页面的筛选条件（按来源平台分流到对应 content script）
  */
-async function readPageSelection(): Promise<void> {
-  feedback.value = null;
-  errorText.value = null;
+async function syncPageSelection(source: RankingSource, silent = false): Promise<void> {
+  if (!silent) {
+    feedback.value = null;
+    errorText.value = null;
+  }
   try {
-    const source = form.value.source;
-    const patterns =
-      source === 'FASTMOSS'
-        ? ['https://www.fastmoss.com/*', 'https://*.fastmoss.com/*']
-        : ['https://echotik.live/*', 'https://*.echotik.live/*'];
-    const origin = currentSourceMeta.value?.origin ?? (source === 'FASTMOSS' ? 'https://www.fastmoss.com' : 'https://echotik.live');
-    const tabs = await browser.tabs.query({ url: patterns });
-    // 登录 Cookie 仅挂在主域，优先主域页面（www 子域没有登录态）
-    const tab = tabs
-      .filter((t) => t.id != null)
-      .sort((a, b) => Number((b.url ?? '').startsWith(origin)) - Number((a.url ?? '').startsWith(origin)))[0];
-    if (!tab || tab.id == null) {
-      throw new Error(`${source}_OFFLINE: 未找到${source === 'FASTMOSS' ? ' FastMoss' : ' EchoTik'} 页面，请先打开榜单页`);
-    }
-    const sel =
-      source === 'FASTMOSS'
-        ? await sendMsg('fastmoss.readPageSelection', undefined, tab.id)
-        : await sendMsg('echotik.readPageSelection', undefined, tab.id);
+    const sel = await sendMsg('ranking.readPageSelection', { source });
     // 仅应用页面真实读到的字段，不做猜测填充
-    if (sel.region) form.value.region = sel.region;
-    if (sel.rankingType) form.value.timeType = String(sel.rankingType).toLowerCase();
-    if (sel.rankingVariant) form.value.variant = String(sel.rankingVariant);
-    if (sel.categoryId) form.value.cat1 = sel.categoryId;
+    // 只允许页面顶部国家选择器提供站点；面板默认值、预设和 URL 参数都不能覆盖它。
+    if (!sel.region) throw new Error('未能从当前页面顶部国家/站点选择器读取站点，请先在来源页面选择国家后重试');
+    const target = forms[source];
+    target.region = sel.region;
+    if (sel.rankingType) target.timeType = String(sel.rankingType).toLowerCase();
+    if (sel.rankingVariant) target.variant = String(sel.rankingVariant);
+    if (sel.categoryId) target.cat1 = sel.categoryId;
     if (sel.periodStart && /^\d{8}$/.test(sel.periodStart)) {
       const p = sel.periodStart;
-      form.value.date = `${p.slice(0, 4)}-${p.slice(4, 6)}-${p.slice(6, 8)}`;
+      target.date = `${p.slice(0, 4)}-${p.slice(4, 6)}-${p.slice(6, 8)}`;
     }
-    if (sel.sortBy) form.value.sortBy = sel.sortBy;
-    feedback.value = '已读取当前页面筛选条件（未读取到的字段保持原值）。';
+    if (sel.sortBy) target.sortBy = sel.sortBy;
+    if (!silent) feedback.value = `已同步 ${source === 'FASTMOSS' ? 'FastMoss' : 'EchoTik'} 页面顶部国家/站点及可读取筛选条件。`;
   } catch (e) {
-    errorText.value = classifyError(e).text;
+    if (!silent) errorText.value = classifyError(e).text;
+    throw e;
   }
+}
+
+/** 手动同步入口；自动同步失败不会干扰页面其它功能。 */
+async function readPageSelection(): Promise<void> {
+  await syncPageSelection(form.value.source).catch(() => undefined);
 }
 
 /**
@@ -467,6 +463,7 @@ async function doPreview(): Promise<void> {
   preview.value = null;
   errorText.value = null;
   try {
+    await syncPageSelection(form.value.source, true);
     preview.value = await sendMsg('ranking.preview', { query: buildQuery() });
   } catch (e) {
     errorText.value = classifyError(e).text;
@@ -499,6 +496,7 @@ function buildSelfTestQuery(variant: string): RankingQuery {
     source: f.source,
     region: f.region,
     categoryId,
+    sellerType: f.sellerType || undefined,
     rankingVariant: variant,
     period: { type: f.timeType, startDate },
     startRank: 1,
@@ -547,6 +545,7 @@ async function startCollect(): Promise<void> {
   errorText.value = null;
   feedback.value = null;
   try {
+    await syncPageSelection(form.value.source, true);
     await sendMsg('ranking.startCollect', { query: buildQuery() });
     progress.value = { running: true, fetched: 0, limit: limit.value, page: 0, done: false };
     pollTimer = setInterval(pollProgress, 1000);
@@ -589,7 +588,7 @@ async function saveCurrentPreset(): Promise<void> {
   const name = presetName.value.trim();
   errorText.value = null;
   try {
-    const saved = await sendMsg('rankingPreset.save', { name, query: buildQuery() });
+    const saved = await sendMsg('rankingPreset.save', { name, source: form.value.source, query: buildQuery() });
     // 先用保存接口的返回值即时刷新界面；随后再从服务端重新读取，保证排序与多端状态一致。
     presets.value = [saved, ...presets.value.filter((p) => p.preset_id !== saved.preset_id)];
     presetName.value = '';
@@ -605,7 +604,7 @@ async function saveCurrentPreset(): Promise<void> {
 async function loadPresets(): Promise<void> {
   presetsLoading.value = true;
   try {
-    presets.value = (await sendMsg('rankingPreset.list', undefined)).items;
+    presets.value = (await sendMsg('rankingPreset.list', { source: form.value.source })).items;
   } catch (e) {
     errorText.value = `加载预设失败：${classifyError(e).text}`;
   } finally {
@@ -618,7 +617,8 @@ function presetSummary(p: RankingPreset): string {
   const q = p.query_json as unknown as RankingQuery;
   const source = sourceLabel(q.source);
   const variant = variantLabel(String(q.rankingVariant ?? 'top-sold'));
-  return [source, q.region, variant].filter(Boolean).join(' · ');
+  const seller = q.sellerType === 'cross-border' ? '跨境店' : q.sellerType === 'local' ? '本土店' : '全部店铺';
+  return [source, q.region, variant, seller].filter(Boolean).join(' · ');
 }
 
 /** 全选或取消选择当前列表中的预设，用于批量采集。 */
@@ -637,6 +637,7 @@ function applyPreset(p: RankingPreset): void {
   activeSource.value = src;
   const f = forms[src] ?? forms.ECHOTIK;
   f.region = q.region;
+  f.sellerType = q.sellerType ?? '';
   f.variant = String(q.rankingVariant ?? f.variant);
   f.timeType = String(q.rankingType ?? f.timeType);
   f.dateRange = q.dateRange ?? f.dateRange;
@@ -651,7 +652,7 @@ function applyPreset(p: RankingPreset): void {
     const s = q.periodStart;
     f.date = `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
   }
-  if (src === 'ECHOTIK' && categories.value.length === 0) loadCategories();
+  if (categories.value.length === 0) void loadCategories();
 }
 
 /**
@@ -796,6 +797,9 @@ function viewSnapshotProducts(s: SnapshotSummary): void {
 
 onMounted(async () => {
   await Promise.all([loadSources(), loadCategories(), loadSnapshots(), loadPresets()]);
+  // 首次进入也以当前来源页顶部站点刷新只读展示。没有打开来源页时保持静默，
+  // 真正预览/采集仍会给出明确错误且后台会再次强制校验。
+  void syncPageSelection(activeSource.value, true).catch(() => undefined);
   // 若进入页面时已有采集在进行，恢复进度轮询
   const p = await sendMsg('ranking.getProgress', undefined).catch(() => null);
   if (p?.running) {
@@ -856,18 +860,25 @@ onUnmounted(() => {
 
       <div class="form-row">
         <label>国家/站点</label>
-        <select v-model="form.region">
-          <option v-for="r in REGION_OPTIONS" :key="r.value" :value="r.value">{{ r.label }}</option>
-        </select>
+        <span class="readonly-field">{{ REGION_OPTIONS.find((r) => r.value === form.region)?.label ?? form.region }}</span>
       </div>
       <p class="muted small" style="margin: -4px 0 8px">
-        {{ form.source === 'FASTMOSS' ? '站点按 FastMoss 页面会话生效，接口参数映射待验证。' : '站点为待验证字段：接口无站点参数，实际以 EchoTik 页面会话为准。' }}
+        国家/站点始终以当前 {{ form.source === 'FASTMOSS' ? 'FastMoss' : 'EchoTik' }} 页面顶部设置为准；进入、切换来源及预览/采集前会自动同步。
       </p>
 
+      <div class="form-row">
+        <label>店铺类型</label>
+        <label><input v-model="form.sellerType" type="radio" value="" /> 全部</label>
+        <label><input v-model="form.sellerType" type="radio" value="cross-border" /> 跨境店</label>
+        <label><input v-model="form.sellerType" type="radio" value="local" /> 本土店</label>
+      </div>
+
       <div class="form-row" v-if="form.source === 'FASTMOSS'">
-        <label>分类 ID</label>
-        <input v-model="form.cat1" placeholder="如 10（居家），留空为全部" style="max-width: 160px" />
-        <span class="muted small">对应页面 URL 的 l1_cid</span>
+        <label>商品分类</label>
+        <select v-model="form.cat1">
+          <option value="">全部</option>
+          <option v-for="c in cat1Options" :key="c.value" :value="c.value">{{ c.label }}</option>
+        </select>
       </div>
       <div class="form-row category-pair" v-if="form.source === 'ECHOTIK'">
         <label>分类</label>
@@ -888,39 +899,42 @@ onUnmounted(() => {
           <option v-for="c in cat3Options" :key="c.value" :value="c.value">{{ c.label }}</option>
         </select>
       </div>
-      <p v-if="form.source === 'ECHOTIK' && catLoading" class="muted small">类目加载中…</p>
-      <p v-else-if="form.source === 'ECHOTIK' && catError" class="muted small">
+      <p v-if="catLoading" class="muted small">类目加载中…</p>
+      <p v-else-if="catError" class="muted small">
         类目不可用：{{ catError }} <button class="link" @click="loadCategories(true)">重试</button>
       </p>
 
       <div class="form-row">
         <label>榜单</label>
-        <select v-model="form.variant">
-          <option v-for="v in variantOptions" :key="v.value" :value="v.value">{{ variantLabel(v.value) }}</option>
-        </select>
-        <select v-model="form.timeType" v-if="form.variant !== 'products'" style="max-width: 90px">
-          <option v-for="t in TIME_TYPE_OPTIONS" :key="t.value" :value="t.value">{{ t.label }}</option>
-        </select>
-        <select v-model.number="form.dateRange" v-else style="max-width: 110px">
-          <option v-for="d in DATE_RANGE_OPTIONS" :key="d.value" :value="d.value">{{ d.label }}</option>
-        </select>
+        <label v-for="v in variantOptions" :key="v.value" style="white-space: nowrap"><input v-model="form.variant" type="radio" :value="v.value" /> {{ variantLabel(v.value) }}</label>
+      </div>
+      <div class="form-row" v-if="form.variant !== 'products' && !isDateFreeFastMossVariant">
+        <label>榜单周期</label>
+        <label v-for="t in TIME_TYPE_OPTIONS" :key="t.value"><input v-model="form.timeType" type="radio" :value="t.value" /> {{ t.label }}</label>
+      </div>
+      <div class="form-row" v-else-if="form.variant === 'products'">
+        <label>统计范围</label>
+        <label v-for="d in DATE_RANGE_OPTIONS" :key="d.value"><input v-model.number="form.dateRange" type="radio" :value="d.value" /> {{ d.label }}</label>
       </div>
 
       <!-- 商品库：无榜单日期，仅统计范围 -->
       <p v-if="form.variant === 'products'" class="muted small" style="margin: -4px 0 8px">
         商品库按统计范围「近 {{ form.dateRange }} 天」指标排序，无日/周/月榜单周期。
       </p>
+      <p v-else-if="isDateFreeFastMossVariant" class="muted small" style="margin: -4px 0 8px">
+        带货视频榜由 FastMoss 的 rank_type=7 固定口径返回，不需要选择榜单日期。
+      </p>
 
       <!-- 日期/周期随日/周/月切换 -->
-      <div class="form-row" v-else-if="form.timeType === 'daily'">
+      <div class="form-row" v-else-if="!isDateFreeFastMossVariant && form.timeType === 'daily'">
         <label>榜单日期</label>
         <input v-model="form.date" type="date" />
       </div>
-      <div class="form-row" v-else-if="form.timeType === 'weekly'">
+      <div class="form-row" v-else-if="!isDateFreeFastMossVariant && form.timeType === 'weekly'">
         <label>榜单周期</label>
         <input v-model="form.week" type="week" />
       </div>
-      <div class="form-row" v-else>
+      <div class="form-row" v-else-if="!isDateFreeFastMossVariant">
         <label>榜单月份</label>
         <input v-model="form.month" type="month" />
       </div>
@@ -982,7 +996,7 @@ onUnmounted(() => {
       </section>
 
       <div class="btn-row" style="flex-wrap: wrap">
-        <button class="act" @click="readPageSelection">读取当前页面筛选条件</button>
+        <button class="act" @click="readPageSelection">同步当前页面筛选条件</button>
         <button class="act" :disabled="previewing" @click="doPreview">{{ previewing ? '预览中…' : '预览榜单' }}</button>
         <button class="act" :disabled="selfTesting" @click="runSelfTest">
           {{ selfTesting ? '自检中…' : `桥接自检（${variantOptions.length} 个榜单）` }}
@@ -1061,7 +1075,7 @@ onUnmounted(() => {
       </div>
       <div class="small">
         已抓 {{ progress.fetched }} / {{ progress.limit }} · 第 {{ progress.page }} 页
-        <template v-if="progress.done"> · 结束原因：{{ REASON_TEXT[progress.reason ?? ''] ?? progress.reason ?? '—' }}</template>
+        <template v-if="progress.reason"> · {{ progress.done ? '结束原因' : '当前状态' }}：{{ REASON_TEXT[progress.reason] ?? progress.reason }}</template>
         <span class="muted"> · 重复与非法条目由适配器自动去重/跳过，未单独计数。</span>
       </div>
       <div class="btn-row" v-if="progress.running">

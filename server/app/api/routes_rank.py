@@ -19,6 +19,7 @@ def _preset_out(preset: RankingPreset) -> dict:
     return {
         "preset_id": preset.preset_id,
         "name": preset.name,
+        "source_platform": preset.source_platform,
         "query_json": preset.query_json,
         "created_at": schemas.dt(preset.created_at),
         "updated_at": schemas.dt(preset.updated_at),
@@ -26,9 +27,12 @@ def _preset_out(preset: RankingPreset) -> dict:
 
 
 @router.get("/ranking-presets")
-def list_ranking_presets(client: CollectorClient = Depends(require_client), db: Session = Depends(get_db)):
-    """列出当前账号共享的筛选预设，最近更新的排在前面。"""
-    items = db.query(RankingPreset).filter(RankingPreset.client_id == client.client_id).order_by(RankingPreset.updated_at.desc()).all()
+def list_ranking_presets(source_platform: str, client: CollectorClient = Depends(require_client), db: Session = Depends(get_db)):
+    """只列出当前账号、当前采集渠道下的筛选预设。"""
+    items = db.query(RankingPreset).filter(
+        RankingPreset.client_id == client.client_id,
+        RankingPreset.source_platform == source_platform,
+    ).order_by(RankingPreset.updated_at.desc()).all()
     return ok({"items": [_preset_out(item) for item in items]})
 
 
@@ -38,10 +42,14 @@ def upsert_ranking_preset(
     client: CollectorClient = Depends(require_client),
     db: Session = Depends(get_db),
 ):
-    """以名称为键创建或覆盖一个账号级筛选预设。"""
-    preset = db.query(RankingPreset).filter(RankingPreset.client_id == client.client_id, RankingPreset.name == body.name).one_or_none()
+    """以名称为键创建或覆盖当前账号、当前渠道下的筛选预设。"""
+    preset = db.query(RankingPreset).filter(
+        RankingPreset.client_id == client.client_id,
+        RankingPreset.source_platform == body.source_platform,
+        RankingPreset.name == body.name,
+    ).one_or_none()
     if preset is None:
-        preset = RankingPreset(client_id=client.client_id, name=body.name, query_json=body.query_json)
+        preset = RankingPreset(client_id=client.client_id, source_platform=body.source_platform, name=body.name, query_json=body.query_json)
         db.add(preset)
     else:
         preset.query_json = body.query_json

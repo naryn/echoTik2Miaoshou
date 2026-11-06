@@ -162,12 +162,11 @@ function applyFilter(): void {
  * @param p 商品
  */
 async function openTikTok(p: ProductItem): Promise<void> {
-  // 空字符串会被 Chrome 当成扩展自身的首页，最终打开 chrome-extension://<id>/。
-  // 只使用有效的 TikTok 链接；历史数据缺失或不合法时，回退到可重定向的官方 PDP 地址。
-  const detailUrl = p.detail_url?.trim();
-  const url = detailUrl && /^https:\/\/(?:www\.|shop\.)?tiktok\.com\//i.test(detailUrl)
-    ? detailUrl
-    : `https://www.tiktok.com/shop/pdp/${encodeURIComponent(p.external_product_id)}`;
+  // 商品列表的“打开”始终使用当前 TikTok Shop PDP 格式；不使用服务端保存的
+  // 历史 detail_url，避免 FastMoss 的 /view/product/{id} 旧路由再次被打开。
+  const market = (p.region ?? 'US').trim().toLowerCase();
+  const countryCode = /^[a-z]{2}$/.test(market) ? market : 'us';
+  const url = `https://shop.tiktok.com/${countryCode}/pdp/${encodeURIComponent(p.external_product_id)}?source=product_detail`;
   await browser.tabs.create({ url });
 }
 

@@ -76,13 +76,14 @@ class AuthUser(Base):
 
 
 class RankingPreset(Base):
-    """账号共享的榜单筛选预设（通过绑定的 client_id 隔离）。"""
+    """账号及采集渠道双重隔离的榜单筛选预设。"""
 
     __tablename__ = "ranking_presets"
-    __table_args__ = (UniqueConstraint("client_id", "name", name="uq_ranking_preset_client_name"),)
+    __table_args__ = (UniqueConstraint("client_id", "source_platform", "name", name="uq_ranking_preset_client_source_name"),)
 
     preset_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: new_id("preset"))
     client_id: Mapped[str] = mapped_column(ForeignKey("collector_clients.client_id"), nullable=False, index=True)
+    source_platform: Mapped[str] = mapped_column(String(16), nullable=False, default="ECHOTIK", index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     query_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

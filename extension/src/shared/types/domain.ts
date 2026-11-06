@@ -43,7 +43,7 @@ export type TimeType = (typeof TIME_TYPES)[number];
 export const TimeTypeSchema = z.enum(TIME_TYPES);
 
 /** EchoTik 榜单变体（接口路径末段；products 为商品库列表接口，非榜单但同样按排名分页采集） */
-export const RANKING_VARIANTS = ['top-sold', 'hot-sell', 'news-burst', 'products'] as const;
+export const RANKING_VARIANTS = ['top-sold', 'hot-sell', 'news-burst', 'video-rank', 'products'] as const;
 export type RankingVariant = (typeof RANKING_VARIANTS)[number];
 export const RankingVariantSchema = z.enum(RANKING_VARIANTS);
 
@@ -83,6 +83,8 @@ export interface RankingQuery {
   region: string;
   /** 分类 ID（各平台格式不同：EchoTik 三级 ID 链；FastMoss l1_cid；由 adapter 自行处理） */
   categoryId?: string;
+  /** 店铺类型：跨境店 / 本土店；未设置代表全部。 */
+  sellerType?: 'cross-border' | 'local';
   /** 榜单变体：接口路径末段（products 为商品库列表接口） */
   rankingVariant?: RankingVariant | string;
   /** 日期时段（统一语义，平台无关） */
@@ -356,6 +358,8 @@ export const ERROR_CODES = {
   RANKING_SOURCE_UNAUTHORIZED: 'RANKING_SOURCE_UNAUTHORIZED',
   /** 来源平台返回无法解析的内容 */
   RANKING_SOURCE_BAD_RESPONSE: 'RANKING_SOURCE_BAD_RESPONSE',
+  /** 榜单来源页面出现人机验证，必须由用户完成验证后再继续 */
+  RANKING_SOURCE_VERIFICATION_REQUIRED: 'RANKING_SOURCE_VERIFICATION_REQUIRED',
   SERVER_UNREACHABLE: 'SERVER_UNREACHABLE',
   SERVER_UNAUTHORIZED: 'SERVER_UNAUTHORIZED',
   SERVER_ERROR: 'SERVER_ERROR',

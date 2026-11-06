@@ -203,11 +203,11 @@ export function createApiClient(opts: ApiClientOptions) {
     },
 
     // ---- 账号级榜单筛选预设 ----
-    listRankingPresets() {
-      return request('GET', '/v1/ranking-presets', null, RankingPresetListSchema) as Promise<{ items: RankingPreset[] }>;
+    listRankingPresets(source: string) {
+      return request('GET', `/v1/ranking-presets?source_platform=${encodeURIComponent(source)}`, null, RankingPresetListSchema) as Promise<{ items: RankingPreset[] }>;
     },
-    saveRankingPreset(name: string, queryJson: Record<string, unknown>) {
-      return request('PUT', '/v1/ranking-presets', { name, query_json: queryJson }, RankingPresetSchema) as Promise<RankingPreset>;
+    saveRankingPreset(name: string, source: string, queryJson: Record<string, unknown>) {
+      return request('PUT', '/v1/ranking-presets', { name, source_platform: source, query_json: queryJson }, RankingPresetSchema) as Promise<RankingPreset>;
     },
     deleteRankingPreset(presetId: string) {
       return request('DELETE', `/v1/ranking-presets/${encodeURIComponent(presetId)}`, null, null) as Promise<{ deleted: boolean }>;
@@ -282,6 +282,26 @@ export function createApiClient(opts: ApiClientOptions) {
         `/v1/rank-snapshots${buildQueryString(params)}`,
         null,
         paginatedSchema(SnapshotSummarySchema),
+      ) as Promise<Paginated<SnapshotSummary>>;
+    },
+    /** 管理员：跨客户端读取全部历史榜单快照（只读）。 */
+    adminListSnapshots(params: {
+      region?: string;
+      ranking_type?: string;
+      category_id?: string;
+      status?: string;
+      source_platform?: string;
+      date_from?: string;
+      date_to?: string;
+      page?: number;
+      per_page?: number;
+    }) {
+      return request(
+        'GET',
+        `/v1/admin/rank-snapshots${buildQueryString(params)}`,
+        null,
+        paginatedSchema(SnapshotSummarySchema),
+        false,
       ) as Promise<Paginated<SnapshotSummary>>;
     },
 

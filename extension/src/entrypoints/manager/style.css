@@ -71,6 +71,10 @@ button.act:hover { border-color: #2563eb; background: #eff6ff; }
   border-radius: 6px; font-size: 12px; background: #fff;
 }
 .form-row input[type="checkbox"] { flex: none; }
+.readonly-field {
+  flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid #e5e7eb;
+  border-radius: 6px; font-size: 12px; background: #f9fafb; color: #4b5563;
+}
 .form-row.category-pair > select { flex: 1 1 0; }
 .form-row.category-pair .secondary-label { width: auto; margin-left: 8px; }
 .form-row.range-summary-row .secondary-label { width: auto; margin-left: 14px; }

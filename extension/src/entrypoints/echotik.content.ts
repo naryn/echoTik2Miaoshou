@@ -15,6 +15,33 @@ import {
 import { ERROR_CODES, type RankingQuery } from '@/shared/types';
 import { wrapHandler } from '@/shared/messaging';
 
+/** EchoTik 的站点由顶部国家选择器控制，URL 通常没有 region 参数。 */
+function detectTopRegion(): string | undefined {
+  // 只检查顶部的“控制项”本身。不能汇总 header/nav 的全部文本：展开的国家菜单或
+  // 页面其它文案可能同时含有多个国家，导致把当前站点误读成第一个匹配项。
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>(
+    'button, [role="button"], [aria-label*="country" i], [aria-label*="region" i], [title*="country" i], [title*="region" i]',
+  ))
+    .filter((el) => {
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.top < 220 && rect.width < 420 && rect.height < 120;
+    })
+  const regions: Array<[string, RegExp]> = [
+    ['US', /united states|美国/], ['MX', /mexico|墨西哥/], ['GB', /united kingdom|英国/],
+    ['ID', /indonesia|印度尼西亚/], ['VN', /vietnam|越南/], ['TH', /thailand|泰国/],
+    ['MY', /malaysia|马来西亚/], ['PH', /philippines|菲律宾/], ['SG', /singapore|新加坡/],
+    ['BR', /brazil|巴西/], ['JP', /japan|日本/], ['KR', /south korea|韩国/],
+    ['ALL', /global|全球/],
+  ];
+  for (const el of candidates) {
+    const text = [el.getAttribute('aria-label'), el.getAttribute('title'), el.innerText, el.textContent]
+      .filter(Boolean).join(' ').toLowerCase();
+    const region = regions.find(([, pattern]) => pattern.test(text))?.[0];
+    if (region) return region;
+  }
+  return undefined;
+}
+
 export default defineContentScript({
   matches: ['https://echotik.live/*', 'https://*.echotik.live/*'],
   runAt: 'document_idle',
@@ -75,6 +102,8 @@ export default defineContentScript({
     function readPageSelection(): Partial<RankingQuery> {
       const sp = new URLSearchParams(location.search);
       const out: Partial<RankingQuery> = {};
+      const region = detectTopRegion();
+      if (region) out.region = region;
       const timeType = sp.get('time_type');
       if (timeType) out.rankingType = timeType;
       const timeRange = sp.get('time_range');
@@ -83,6 +112,9 @@ export default defineContentScript({
       if (order) out.sortBy = order;
       const cats = sp.get('product_categories');
       if (cats) out.categoryId = cats;
+      const shopType = sp.get('shop_type');
+      if (shopType === '1') out.sellerType = 'local';
+      if (shopType === '2') out.sellerType = 'cross-border';
       return out;
     }
 

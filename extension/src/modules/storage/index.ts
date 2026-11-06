@@ -36,6 +36,8 @@ export const STORAGE_DEFAULTS = {
   category_cache: null as { items: CategoryNode[]; fetched_at: string } | null,
   /** 英文类目树缓存（仅用于把旧记录里的英文类目名映射为中文） */
   category_cache_en: null as { items: CategoryNode[]; fetched_at: string } | null,
+  /** FastMoss 一级类目缓存，与 EchoTik 类目树严格分离。 */
+  fastmoss_category_cache: null as { items: CategoryNode[]; fetched_at: string } | null,
   /** 榜单筛选预设 */
   filter_presets: [] as FilterPreset[],
   /** 执行参数（规范 §3.7） */

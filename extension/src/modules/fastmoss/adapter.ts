@@ -14,6 +14,7 @@ import {
   getPeriodStartDate,
   getPeriodType,
   type ProductRankingEntry,
+  type CategoryNode,
   type RankingCapabilities,
   type RankingPage,
   type RankingQuery,
@@ -50,6 +51,8 @@ export interface FastMossTransport {
   readCapturedCalls(): Promise<CapturedApiCall[]>;
   /** 读取页面 URL 中的筛选条件 */
   readPageSelection(): Promise<Partial<RankingQuery>>;
+  /** 抓取前检测页面是否出现滑块/人机验证。 */
+  checkChallenge(): Promise<{ state: 'CLEAR' | 'CHALLENGE' | 'ACCESS_RESTRICTED'; evidence: string }>;
 }
 
 /** 适配器版本（模板机制变更时递增） */
@@ -79,6 +82,7 @@ const KNOWN_ENDPOINTS: Record<string, string> = {
   'top-sold': '/api/goods/saleRank',
   'hot-sell': '/api/goods/popRank',
   'news-burst': '/api/goods/newProduct',
+  'video-rank': '/api/video/hotGoodsVideoGroupByProduct',
 };
 
 /** 参数结构相同、可直接互换的两个畅销/热销接口 */
@@ -88,6 +92,36 @@ const SALE_RANK_FAMILY = ['/api/goods/saleRank', '/api/goods/popRank'];
 const ORDER_BY_VARIANT: Record<string, string> = {
   'top-sold': '1,2',
   'hot-sell': '4,2',
+};
+
+/**
+ * 已由 2026-11-07 的 FastMoss 页面 bundle 确认的一级类目。
+ *
+ * FastMoss 的分类接口不是稳定公开接口；这个枚举让采集器在它不可用时仍
+ * 能展示、保存和回放一级类目。二、三级分类继续由页面 URL 的 l2_cid/l3_cid
+ * 透传，避免把猜测的 ID 固化到扩展中。
+ */
+const FAST_MOSS_L1_CATEGORIES: CategoryNode[] = [
+  ['14', '美妆个护'], ['11', '女装与女士内衣'], ['5', '保健'], ['12', '时尚配件'],
+  ['7', '运动与户外'], ['15', '手机与数码'], ['10', '居家日用'], ['2', '食品饮料'],
+  ['3', '汽车与摩托车'], ['4', '男装与男士内衣'], ['9', '收藏品'], ['6', '玩具和爱好'],
+  ['13', '厨房用品'], ['16', '家装建材'], ['17', '电脑办公'], ['18', '箱包'],
+  ['19', '鞋靴'], ['20', '五金工具'], ['21', '家纺布艺'], ['22', '家电'],
+  ['23', '宠物用品'], ['24', '珠宝与衍生品'], ['25', '图书&杂志&音频'], ['26', '母婴用品'],
+  ['27', '家具'], ['28', '儿童时尚'], ['29', '穆斯林时尚'], ['30', '二手'],
+  ['31', '预订和优惠券'], ['32', '虚拟商品'],
+].map(([value, label]) => ({ value, label }));
+
+/** 不依赖页面请求捕获的销量榜模板；页面首屏为 SSR 时也能直接采集。 */
+const DEFAULT_TEMPLATES: Record<string, CapturedApiCall> = {
+  'top-sold': {
+  method: 'GET',
+  url: 'https://www.fastmoss.com/api/goods/saleRank?page=1&pagesize=10&order=1%2C2&seller_type=2',
+  at: 'bootstrap',
+  },
+  'hot-sell': { method: 'GET', url: 'https://www.fastmoss.com/api/goods/popRank?page=1&pagesize=10&order=4%2C2&seller_type=2', at: 'bootstrap' },
+  'news-burst': { method: 'GET', url: 'https://www.fastmoss.com/api/goods/newProduct?rank_type=11&page=1&pagesize=10&order=1%2C2&seller_type=2', at: 'bootstrap' },
+  'video-rank': { method: 'GET', url: 'https://www.fastmoss.com/api/video/hotGoodsVideoGroupByProduct?rank_type=7&page=1&pagesize=10&order=1%2C2&seller_type=2', at: 'bootstrap' },
 };
 
 /**
@@ -193,7 +227,10 @@ export function buildReplayUrl(
     url.searchParams.set(name, isOffset ? String((page - 1) * perPage) : String(page));
   }
   overrideParam(url.searchParams, PER_PAGE_PARAM_NAMES, () => String(perPage));
-  overrideParam(url.searchParams, REGION_PARAM_NAMES, () => query.region);
+  // 直连模板没有 region，而 FastMoss 的榜单接口必须携带当前站点区域。
+  // 捕获到的请求则保留参数名并覆写值。
+  const replacedRegion = overrideParam(url.searchParams, REGION_PARAM_NAMES, () => query.region);
+  if (!replacedRegion && query.region) url.searchParams.set('region', query.region);
   // 周期：类型转枚举值（1/2/3），值按日/周/月格式化
   const dateType = DATE_TYPE_VALUE[getPeriodType(query) ?? ''];
   if (dateType != null) overrideParam(url.searchParams, PERIOD_TYPE_PARAM_NAMES, () => String(dateType));
@@ -204,6 +241,14 @@ export function buildReplayUrl(
   if (range) {
     if (url.searchParams.has('start_date')) url.searchParams.set('start_date', range.start);
     if (url.searchParams.has('end_date')) url.searchParams.set('end_date', range.end);
+  }
+  if (url.pathname === KNOWN_ENDPOINTS['news-burst']) url.searchParams.set('rank_type', '11');
+  if (url.pathname === KNOWN_ENDPOINTS['video-rank']) {
+    url.searchParams.set('rank_type', '7');
+    url.searchParams.delete('date_type');
+    url.searchParams.delete('date_value');
+    url.searchParams.delete('start_date');
+    url.searchParams.delete('end_date');
   }
   // 分类：站点约定 l1_cid/l2_cid/l3_cid，l1_cid=all 表示全部分类（等同不筛选）
   if (query.categoryId && query.categoryId !== 'all') {
@@ -216,6 +261,8 @@ export function buildReplayUrl(
   if (url.searchParams.has('order') && ORDER_BY_VARIANT[variant]) {
     url.searchParams.set('order', ORDER_BY_VARIANT[variant]!);
   }
+  // FastMoss saleslist：seller_type=1 本土店，2 跨境店。
+  if (query.sellerType) url.searchParams.set('seller_type', query.sellerType === 'local' ? '1' : '2');
   const params: Record<string, string | number> = {};
   url.searchParams.forEach((value, key) => {
     params[key] = value;
@@ -267,17 +314,15 @@ export function createFastMossAdapter(transport: FastMossTransport): IRankingAda
   /**
    * 选出一个可用的请求模板：优先最近一次带分页参数的榜单请求
    */
-  async function pickTemplate(): Promise<CapturedApiCall> {
+  async function pickTemplate(query: RankingQuery): Promise<CapturedApiCall> {
     const calls = (await transport.readCapturedCalls()).filter(isRankingCall);
-    const withPaging = calls.filter((c) => PAGE_PARAM_NAMES.some((n) => c.url.includes(`${n}=`)));
-    const template = withPaging[withPaging.length - 1] ?? calls[calls.length - 1];
-    if (!template) {
-      throw Object.assign(
-        new Error('FastMoss 尚未捕获到榜单接口请求：请打开 FastMoss 榜单页并切换一次筛选（国家/周期/分类），再重试'),
-        { code: ERROR_CODES.RANKING_SOURCE_NO_CAPTURE },
-      );
-    }
-    return template;
+    const target = KNOWN_ENDPOINTS[String(query.rankingVariant ?? 'top-sold')];
+    const matching = target ? calls.filter((c) => new URL(c.url, 'https://www.fastmoss.com').pathname === target) : calls;
+    const withPaging = matching.filter((c) => PAGE_PARAM_NAMES.some((n) => c.url.includes(`${n}=`)));
+    const template = withPaging[withPaging.length - 1] ?? matching[matching.length - 1];
+    // saleslist 初始数据由 Next.js SSR 返回，不会触发浏览器 fetch/XHR；此时
+    // 使用已验证的 endpoint，由 MAIN world 桥按当前时间生成 fm-sign。
+    return template ?? DEFAULT_TEMPLATES[String(query.rankingVariant ?? 'top-sold')] ?? DEFAULT_TEMPLATES['top-sold']!;
   }
 
   /**
@@ -286,7 +331,14 @@ export function createFastMossAdapter(transport: FastMossTransport): IRankingAda
    * @param page 页码（从 1 开始）
    */
   async function fetchPage(query: RankingQuery, page: number): Promise<RankingPage> {
-    const template = await pickTemplate();
+    const challenge = await transport.checkChallenge();
+    if (challenge.state !== 'CLEAR') {
+      throw Object.assign(
+        new Error(`FastMoss 需要完成滑块/人机验证后才能采集：${challenge.evidence}`),
+        { code: ERROR_CODES.RANKING_SOURCE_VERIFICATION_REQUIRED },
+      );
+    }
+    const template = await pickTemplate(query);
     const perPage = Math.min(MAX_PAGE_SIZE, Math.max(1, query.perPage ?? 10));
     const { path } = buildReplayUrl(template, page, perPage, query);
     let payload: unknown;
@@ -301,6 +353,13 @@ export function createFastMossAdapter(transport: FastMossTransport): IRankingAda
         headers: template.headers,
       });
       if (!isRiskBlocked(payload)) break;
+      const latestChallenge = await transport.checkChallenge();
+      if (latestChallenge.state !== 'CLEAR') {
+        throw Object.assign(
+          new Error(`FastMoss 需要完成滑块/人机验证后才能采集：${latestChallenge.evidence}`),
+          { code: ERROR_CODES.RANKING_SOURCE_VERIFICATION_REQUIRED },
+        );
+      }
       if (attempt >= RISK_RETRY_TIMES) {
         throw Object.assign(
           new Error('FastMoss 接口被风控拦截：请在榜单页切换一次筛选（重新生成请求签名）后重试'),
@@ -328,7 +387,7 @@ export function createFastMossAdapter(transport: FastMossTransport): IRankingAda
     /** 能力声明（FastMoss 目前按商品榜三期/周期维度暴露） */
     async capabilities(): Promise<RankingCapabilities> {
       return {
-        variants: ['top-sold', 'hot-sell', 'news-burst', 'products'],
+        variants: ['top-sold', 'hot-sell', 'news-burst', 'video-rank'],
         timeTypes: ['daily', 'weekly', 'monthly'],
         orderFields: { 'top-sold': ['sales', 'gmv'], 'hot-sell': ['sales', 'gmv'] },
         maxPerPage: MAX_PAGE_SIZE,
@@ -371,8 +430,12 @@ export function createFastMossAdapter(transport: FastMossTransport): IRankingAda
         } catch (err) {
           const code = (err as { code?: string }).code;
           // 权限受限（MAG_AUTH）保留已抓数据，与 EchoTik 的 PARTIAL 语义一致
-          if (code === 'PERMISSION_LIMIT' && entries.length) reason = 'PERMISSION_LIMIT';
-          else reason = entries.length ? 'PARTIAL_ERROR' : 'FAILED';
+          if (code === ERROR_CODES.RANKING_SOURCE_VERIFICATION_REQUIRED) reason = 'WAITING_VERIFICATION';
+          else if (code === 'PERMISSION_LIMIT' && entries.length) reason = 'PERMISSION_LIMIT';
+          // 首页错误必须保留底层错误码，便于区分页面桥、签名、风控或响应结构，
+          // 不再把所有问题都吞成无信息的 FAILED。
+          else if (entries.length) reason = 'PARTIAL_ERROR';
+          else reason = `FAILED_${code ?? 'UNKNOWN'}`;
           break;
         }
         if (!pageResult.records.length) {
@@ -401,9 +464,9 @@ export function createFastMossAdapter(transport: FastMossTransport): IRankingAda
       return { entries, reason };
     },
 
-    /** FastMoss 品类树暂未接入，返回空数组（UI 会退化为手填分类） */
+    /** 返回从 FastMoss 榜单筛选器提取并核验过的一级类目。 */
     async fetchCategories() {
-      return [];
+      return FAST_MOSS_L1_CATEGORIES;
     },
   };
 }

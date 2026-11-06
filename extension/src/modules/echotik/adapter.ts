@@ -88,6 +88,8 @@ export interface EchoTikTransport {
    * @param lang 语言（默认 zh-CN，en 用于补全英文类目对照）
    */
   request(path: string, params: Record<string, string | number>, lang?: 'zh-CN' | 'en'): Promise<unknown>;
+  /** 读取当前 EchoTik 榜单页的顶部站点和 URL 筛选条件。 */
+  readPageSelection?(): Promise<Partial<RankingQuery>>;
 }
 
 /** EchoTik 业务错误 */
@@ -107,6 +109,7 @@ const ORDER_FIELDS: Record<RankingVariant, string[]> = {
   'top-sold': ['sale_cnt', 'total_gmv_amt'],
   'hot-sell': ['sale_cnt', 'total_gmv_amt'],
   'news-burst': ['total_sale_gmv_7d_amt'],
+  'video-rank': [],
   // 商品库接口（products.md）：order 只使用文档示例中出现的字段
   products: [
     'total_sale_nd_cnt',
@@ -210,6 +213,7 @@ export function createEchoTikAdapter(transport: EchoTikTransport): IRankingAdapt
         sort: 'desc',
       };
       if (query.sortBy) params.order = query.sortBy;
+      if (query.sellerType) params.shop_type = query.sellerType === 'local' ? 1 : 2;
       return params;
     }
 
@@ -226,6 +230,8 @@ export function createEchoTikAdapter(transport: EchoTikTransport): IRankingAdapt
       'product_categories[]': query.categoryId ?? '',
     };
     if (query.sortBy) params.order = query.sortBy;
+    // EchoTik 响应枚举确认：shop_type=1 为本土店；2 为跨境店。
+    if (query.sellerType) params.shop_type = query.sellerType === 'local' ? 1 : 2;
     return params;
   }
 
@@ -248,8 +254,9 @@ export function createEchoTikAdapter(transport: EchoTikTransport): IRankingAdapt
      * @param _tabId 目标 Tab
      */
     async readCurrentPageSelection(_tabId: number): Promise<Partial<RankingQuery>> {
-      // 实际实现位于 background：向 echotik content script 发 'echotik.readPageSelection'
-      return {};
+      // 实际读取位于 background/content script；站点必须来自页面顶部选择器，
+      // 不能回退到面板中曾经保存的 region。
+      return transport.readPageSelection?.().catch(() => ({})) ?? {};
     },
 
     /**

@@ -10,6 +10,7 @@ import { browser } from 'wxt/browser';
 import { defineContentScript } from 'wxt/utils/define-content-script';
 import { wrapHandler } from '@/shared/messaging';
 import { dlog } from '@/modules/debug/log';
+import { detectChallenge } from '@/modules/challenge/detector';
 import {
   FAST_MOSS_BRIDGE,
   type FastMossBridgeRequest,
@@ -17,6 +18,32 @@ import {
   type FastMossCapturedCall,
 } from '@/shared/types/messages';
 import type { RankingQuery } from '@/shared/types';
+
+/** 从页面顶部国家选择器的可见文案解析站点，避免使用面板手工值。 */
+function detectTopRegion(): string | undefined {
+  // 单独检查顶部控制项，避免国家下拉菜单及页面正文的其它国家名称污染结果。
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>(
+    'button, [role="button"], [aria-label*="country" i], [aria-label*="region" i], [title*="country" i], [title*="region" i]',
+  ))
+    .filter((el) => {
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.top < 220 && rect.width < 420 && rect.height < 120;
+    })
+  const regions: Array<[string, RegExp]> = [
+    ['US', /united states|美国/], ['MX', /mexico|墨西哥/], ['GB', /united kingdom|英国/],
+    ['ID', /indonesia|印度尼西亚/], ['VN', /vietnam|越南/], ['TH', /thailand|泰国/],
+    ['MY', /malaysia|马来西亚/], ['PH', /philippines|菲律宾/], ['SG', /singapore|新加坡/],
+    ['BR', /brazil|巴西/], ['JP', /japan|日本/], ['KR', /south korea|韩国/],
+    ['ALL', /global|全球/],
+  ];
+  for (const el of candidates) {
+    const text = [el.getAttribute('aria-label'), el.getAttribute('title'), el.innerText, el.textContent]
+      .filter(Boolean).join(' ').toLowerCase();
+    const region = regions.find(([, pattern]) => pattern.test(text))?.[0];
+    if (region) return region;
+  }
+  return undefined;
+}
 
 export default defineContentScript({
   matches: ['https://www.fastmoss.com/*', 'https://*.fastmoss.com/*'],
@@ -57,6 +84,8 @@ export default defineContentScript({
           return wrapHandler<'fastmoss.readPageSelection'>(async () => readPageSelection())(undefined, null);
         case 'fastmoss.checkLogin':
           return wrapHandler<'fastmoss.checkLogin'>(async () => checkLogin())(undefined, null);
+        case 'fastmoss.checkChallenge':
+          return wrapHandler<'fastmoss.checkChallenge'>(async () => checkChallenge())(undefined, null);
         default:
           return { ok: false, error: { code: 'UNKNOWN_MESSAGE', message: String(msg.type) } };
       }
@@ -110,12 +139,18 @@ export default defineContentScript({
         }
         return undefined;
       };
-      const region = pick('region', 'country', 'countryCode', 'market');
+      const region = detectTopRegion() ?? pick('region', 'country', 'countryCode', 'market');
       const dateTypeRaw = pick('date_type', 'dateType');
       const periodRaw = pick('period', 'time_type', 'timeType', 'dateRange', 'date_value', 'dateValue');
       // 分类：页面用 l1_cid / l2_cid / l3_cid，其中 l1_cid=all 表示全部分类
       const categoryRaw = pick('l3_cid', 'l2_cid', 'l1_cid', 'category_id', 'categoryId', 'cate_id', 'cateId', 'category');
       const categoryId = categoryRaw && categoryRaw !== 'all' ? categoryRaw : undefined;
+      const sellerTypeRaw = pick('seller_type', 'sellerType');
+      const sellerType = sellerTypeRaw === '1' || sellerTypeRaw === 'local'
+        ? 'local'
+        : sellerTypeRaw === '2' || sellerTypeRaw === 'cross-border'
+          ? 'cross-border'
+          : undefined;
 
       // 周期类型：优先枚举 date_type（1 日 / 2 周 / 3 月），否则按文本推断
       const byEnum: Record<string, RankingQuery['rankingType']> = { '1': 'daily', '2': 'weekly', '3': 'monthly' };
@@ -152,6 +187,7 @@ export default defineContentScript({
         dateTypeRaw,
         periodRaw,
         categoryId,
+        sellerType,
         rankingVariant,
       });
       return {
@@ -159,6 +195,7 @@ export default defineContentScript({
         ...(rankingType ? { rankingType } : {}),
         ...(rankingVariant ? { rankingVariant } : {}),
         ...(categoryId ? { categoryId } : {}),
+        ...(sellerType ? { sellerType } : {}),
         ...(periodStart ? { periodStart } : {}),
       };
     }
@@ -182,6 +219,38 @@ export default defineContentScript({
         return { logged_in: false, evidence: '正文出现「登录后查看」类提示' };
       }
       return { logged_in: true, evidence: '未发现可见登录入口，判定已登录（启发式）' };
+    }
+
+    /**
+     * 检测 FastMoss 的滑块/人机验证层。只提示用户完成验证，绝不尝试模拟拖动。
+     */
+    function checkChallenge(): { state: 'CLEAR' | 'CHALLENGE' | 'ACCESS_RESTRICTED'; evidence: string } {
+      const bodyText = (document.body?.innerText ?? '').slice(0, 12_000);
+      const strongChallengeSelector = [
+        'iframe[src*="captcha" i]', 'iframe[src*="challenge" i]', 'iframe[src*="verify" i]',
+        '[id*="captcha" i]', '[class*="captcha" i]', '[id*="geetest" i]', '[class*="geetest" i]',
+        '[id*="verify" i]', '[class*="verify" i]',
+      ].join(',');
+      // "slider" 是常见布局类名，不能单独作为验证码依据；仅在同时出现验证文案时认定。
+      const hasVisibleSlider = Array.from(document.querySelectorAll('[id*="slider" i], [class*="slider" i]'))
+        .some((el) => {
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+      const hasVerificationText = /安全验证|人机验证|拖动滑块|完成验证|verify|captcha|security check/i.test(bodyText);
+      const verdict = detectChallenge({
+        url: location.href,
+        title: document.title,
+        hasChallengeIframe: document.querySelectorAll('iframe[src*="captcha" i], iframe[src*="challenge" i], iframe[src*="verify" i]').length > 0,
+        hasCaptchaDom: document.querySelector(strongChallengeSelector) !== null || (hasVisibleSlider && hasVerificationText),
+        bodyTextSample: bodyText,
+      });
+      return {
+        state: verdict.state,
+        evidence: verdict.matchedRules.length
+          ? `FastMoss 页面命中验证规则：${verdict.matchedRules.join(', ')}`
+          : '未发现滑块/人机验证层',
+      };
     }
   },
 });

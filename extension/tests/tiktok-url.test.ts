@@ -48,6 +48,12 @@ describe('resolveDetailUrl', () => {
     );
   });
 
+  it('将历史 FastMoss /view/product 链接转换为 PDP 链接', () => {
+    expect(resolveDetailUrl('1729532560217314285', 'https://shop.tiktok.com/view/product/1729532560217314285?region=US&local=en')).toBe(
+      'https://shop.tiktok.com/us/pdp/1729532560217314285?source=product_detail',
+    );
+  });
+
   it('服务端链接非法时回退到规范模板', () => {
     expect(resolveDetailUrl('123', 'https://example.com/x')).toBe(
       'https://www.tiktok.com/shop/pdp/123',

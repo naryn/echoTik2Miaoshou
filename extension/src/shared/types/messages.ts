@@ -57,8 +57,8 @@ export interface MessageMap {
   'ranking.startCollect': { req: { query: RankingQuery }; res: { snapshot_local_id: string } };
   'ranking.runPresetBatch': { req: { queries: RankingQuery[] }; res: { started: number } };
   'ranking.presetBatchProgress': { req: void; res: { running: boolean; current: number; total: number; completed: number; failed: number } };
-  'rankingPreset.list': { req: void; res: { items: RankingPreset[] } };
-  'rankingPreset.save': { req: { name: string; query: RankingQuery }; res: RankingPreset };
+  'rankingPreset.list': { req: { source: RankingSource }; res: { items: RankingPreset[] } };
+  'rankingPreset.save': { req: { name: string; query: RankingQuery; source: RankingSource }; res: RankingPreset };
   'rankingPreset.delete': { req: { preset_id: string }; res: { deleted: boolean } };
   'ranking.getProgress': {
     req: void;
@@ -102,9 +102,16 @@ export interface MessageMap {
     req: { query: RankingQuery };
     res: { items: ProductRankingEntry[]; total?: number; hasMore: boolean };
   };
+  /** 经后台读取指定来源的页面筛选；后台会恢复未注入的 content script。 */
+  'ranking.readPageSelection': { req: { source: RankingSource }; res: Partial<RankingQuery> };
   /** EchoTik 类目树（background 抓取 + chrome.storage.local 缓存） */
   'echotik.getCategories': {
     req: { force?: boolean } | void;
+    res: { items: CategoryNode[]; cached: boolean; fetched_at: string };
+  };
+  /** 按榜单渠道获取分类；缓存按渠道隔离。 */
+  'ranking.getCategories': {
+    req: { source: RankingSource; force?: boolean };
     res: { items: CategoryNode[]; cached: boolean; fetched_at: string };
   };
   /** 已注册的榜单来源平台（UI 平台下拉用） */
@@ -143,6 +150,11 @@ export interface MessageMap {
   'fastmoss.readPageSelection': { req: void; res: Partial<RankingQuery> };
   /** FastMoss 登录态探测 */
   'fastmoss.checkLogin': { req: void; res: { logged_in: boolean; evidence: string } };
+  /** FastMoss 滑块/人机验证探测；只报告状态，不尝试绕过验证。 */
+  'fastmoss.checkChallenge': {
+    req: void;
+    res: { state: 'CLEAR' | 'CHALLENGE' | 'ACCESS_RESTRICTED'; evidence: string };
+  };
   /** 商品列表（服务端分页/筛选，普通账号自动按自身数据隔离） */
   'product.list': {
     req: {
@@ -244,6 +256,8 @@ export interface MessageMap {
   };
   /** 管理员：全量商品列表 */
   'admin.listProducts': { req: AdminProductQuery; res: Paginated<ProductItem> };
+  /** 管理员：全量历史榜单快照 */
+  'admin.listSnapshots': { req: MessageMap['snapshot.list']['req']; res: Paginated<SnapshotSummary> };
   /** 手动触发 outbox 补传（返回本次成功补传条数） */
   'outbox.flush': { req: void; res: { synced: number; remaining: number } };
   /** 页面环境探测：EchoTik 登录态 / TikTok 工作 Tab / 妙手检测 / 服务器连通 */

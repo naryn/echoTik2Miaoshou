@@ -89,3 +89,4 @@ def init_db() -> None:
     # 历史库无 source_platform 列：ALTER 回填默认值 ECHOTIK
     _ensure_source_platform_column("rank_snapshots", "ix_rank_snapshots_source_platform")
     _ensure_source_platform_column("collection_batches")
+    _ensure_source_platform_column("ranking_presets", "ix_ranking_presets_source_platform")

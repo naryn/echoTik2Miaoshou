@@ -177,14 +177,16 @@ export function extractProductItems(payload: unknown, maxDepth = 6): Record<stri
 }
 
 /**
- * 构造 TikTok Shop 商品链接（新品榜接口不返回 detail_url，用 product_id + region 拼出）
+ * 构造 TikTok Shop PDP 链接。不要使用 /view/product/{id}：该旧路由查看不便，
+ * 且不会进入当前商品详情页的完整交互流程。
  * @param id 商品 ID
  * @param region 站点
  */
 function buildDetailUrl(id: string, region: string): string | undefined {
   if (!/^\d{6,}$/.test(id)) return undefined;
-  const q = region ? `?region=${encodeURIComponent(region)}&local=en` : '';
-  return `https://shop.tiktok.com/view/product/${id}${q}`;
+  const market = region.trim().toLowerCase();
+  const safeMarket = /^[a-z]{2}$/.test(market) ? market : 'us';
+  return `https://shop.tiktok.com/${safeMarket}/pdp/${id}?source=product_detail`;
 }
 
 /**
@@ -217,8 +219,9 @@ export function normalizeFastMossItem(
     gmv,
     image_url: pickString(obj, FIELD_ALIASES.image),
     category: pickString(obj, FIELD_ALIASES.category),
-    // 实测 detail_url 为 TikTok Shop 商品链接，可直接用于妙手采集
-    detail_url: pickString(obj, FIELD_ALIASES.detailUrl) ?? buildDetailUrl(id, pickString(obj, FIELD_ALIASES.region) ?? region),
+    // 统一生成当前 TikTok Shop PDP 格式，避免 FastMoss 旧的 /view/product 链接。
+    detail_url: buildDetailUrl(id, pickString(obj, FIELD_ALIASES.region) ?? region)
+      ?? pickString(obj, FIELD_ALIASES.detailUrl),
     metrics: price ? { price: price.value } : undefined,
     observed_at: new Date().toISOString(),
   };

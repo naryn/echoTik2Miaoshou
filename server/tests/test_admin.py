@@ -60,7 +60,7 @@ def test_user_only_sees_own_data(client, db_session):
     snapshot_a = make_snapshot_with_entries(
         client, headers_a, n=3, request_id="snap-a", external_prefix="A170"
     )
-    make_snapshot_with_entries(
+    snapshot_b = make_snapshot_with_entries(
         client, headers_b, n=3, request_id="snap-b", external_prefix="B170"
     )
 
@@ -123,6 +123,10 @@ def test_admin_reads_all_clients(client, db_session, admin_headers):
 
     all_products = client.get("/v1/admin/products", headers=admin_headers).json()["data"]
     assert all_products["total"] == 4
+
+    all_snapshots = client.get("/v1/admin/rank-snapshots", headers=admin_headers).json()["data"]
+    assert all_snapshots["total"] == 2
+    assert {snapshot["snapshot_id"] for snapshot in all_snapshots["items"]} == {snapshot_a, snapshot_b}
 
     # 普通账号不能访问管理端
     denied = client.get("/v1/admin/batches", headers=headers_a)

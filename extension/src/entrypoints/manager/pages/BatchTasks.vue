@@ -6,7 +6,7 @@
  *   结果过滤、单任务侧滑抽屉、采集尝试时间线
  * - 运行前检查（登录态/TikTok Tab/妙手/远程），不通过时显示具体错误与"重新检测"
  */
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { sendMsg } from '@/shared/messaging';
 import type { AttemptItem, BatchItem, ClientMe, Paginated, TaskItem } from '@/shared/types';
@@ -77,11 +77,25 @@ const attempts = ref<AttemptItem[]>([]);
 const precheck = ref<MessageMap['env.check']['res'] | null>(null);
 const precheckErrors = ref<string[]>([]);
 const acting = ref(false);
+let activeBatchRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
+const ACTIVE_BATCH_STATUSES = new Set(['RUNNING', 'PAUSED', 'WAITING_VERIFICATION', 'RECOVERING']);
+
+/**
+ * 服务端按 TASK_STATUS 返回 summary.by_status（大写）；早期接口也可能返回
+ * success/failed 等扁平字段。统一读取两种结构，避免任务状态计数显示为 0。
+ */
+function batchSummaryCount(b: BatchItem, outcome: 'success' | 'failed' | 'skipped' | 'unknown'): number {
+  const summary = b.summary;
+  if (!summary) return 0;
+  return summary[outcome] ?? summary.by_status?.[outcome.toUpperCase()] ?? 0;
+}
 
 /** 批次进度（已处理/总数） */
 function batchProgress(b: BatchItem): { done: number; total: number } {
   const s = b.summary ?? {};
-  const done = (s.success ?? 0) + (s.failed ?? 0) + (s.skipped ?? 0) + (s.unknown ?? 0);
+  const done = batchSummaryCount(b, 'success') + batchSummaryCount(b, 'failed')
+    + batchSummaryCount(b, 'skipped') + batchSummaryCount(b, 'unknown');
   return { done, total: s.total ?? done };
 }
 
@@ -141,6 +155,28 @@ async function loadBatches(): Promise<void> {
   } finally {
     listLoading.value = false;
   }
+}
+
+/**
+ * 活动批次才轮询。列表原先只在首次进入时加载，任务完成后仍展示初始的
+ * “运行中 0/1”快照；此处直接读取服务端最新批次状态与统计。
+ */
+async function refreshActiveBatches(): Promise<void> {
+  const hasActiveListItem = (batches.value?.items ?? []).some((batch) => ACTIVE_BATCH_STATUSES.has(batch.status));
+  const hasActiveDetail = !!detail.value && ACTIVE_BATCH_STATUSES.has(detail.value.status);
+  if (!hasActiveListItem && !hasActiveDetail) return;
+  if (detail.value) {
+    try {
+      detail.value = isAdmin.value
+        ? await sendMsg('admin.getBatch', { batch_id: detail.value.batch_id })
+        : await sendMsg('batch.get', { batch_id: detail.value.batch_id });
+      await Promise.all([loadTasks(), loadAttempts()]);
+    } catch {
+      // 下一轮继续尝试；不以短暂网络错误覆盖用户当前视图。
+    }
+  }
+  await loadBatches();
+  await refreshState().catch(() => undefined);
 }
 
 /**
@@ -337,6 +373,11 @@ onMounted(async () => {
     .catch(() => undefined);
   await loadAdminClients();
   await loadBatches();
+  activeBatchRefreshTimer = setInterval(() => void refreshActiveBatches(), 3_000);
+});
+
+onUnmounted(() => {
+  if (activeBatchRefreshTimer) clearInterval(activeBatchRefreshTimer);
 });
 
 // 隐藏设置切换管理员模式后，重置到列表层并按新数据源重新加载
@@ -419,8 +460,8 @@ watch(isAdmin, async () => {
               <td class="small">{{ formatTime(b.created_at) }}</td>
               <td class="small">{{ batchProgress(b).done }}/{{ batchProgress(b).total || '—' }}</td>
               <td class="small">
-                成 {{ b.summary?.success ?? 0 }} 跳 {{ b.summary?.skipped ?? 0 }}<br />
-                败 {{ b.summary?.failed ?? 0 }} 未 {{ b.summary?.unknown ?? 0 }}
+                成 {{ batchSummaryCount(b, 'success') }} 跳 {{ batchSummaryCount(b, 'skipped') }}<br />
+                败 {{ batchSummaryCount(b, 'failed') }} 未 {{ batchSummaryCount(b, 'unknown') }}
               </td>
               <td><span :class="statusBadgeClass(b.status)">{{ statusText(b.status) }}</span></td>
               <td class="small muted">{{ formatTime(b.started_at) }}<br />{{ formatTime(b.finished_at) }}</td>
@@ -467,8 +508,8 @@ watch(isAdmin, async () => {
         </div>
         <div class="small">
           进度 {{ batchProgress(detail).done }}/{{ batchProgress(detail).total || '—' }} ·
-          成功 {{ detail.summary?.success ?? 0 }} · 跳过 {{ detail.summary?.skipped ?? 0 }} ·
-          失败 {{ detail.summary?.failed ?? 0 }} · 不确定 {{ detail.summary?.unknown ?? 0 }}
+          成功 {{ batchSummaryCount(detail, 'success') }} · 跳过 {{ batchSummaryCount(detail, 'skipped') }} ·
+          失败 {{ batchSummaryCount(detail, 'failed') }} · 不确定 {{ batchSummaryCount(detail, 'unknown') }}
         </div>
         <div class="btn-row" style="flex-wrap: wrap">
           <template v-if="!isAdmin">

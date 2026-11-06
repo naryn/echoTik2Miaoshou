@@ -58,8 +58,9 @@ Chrome → `chrome://extensions` → 开发者模式 → 加载已解压的扩�
 | 三榜单（热销/热推/新品）+ 商品库抓取、类目三级级联、排序维度按变体收敛 | ✅ | [adapter.ts](extension/src/modules/echotik/adapter.ts)、[RankingCollector.vue](extension/src/entrypoints/sidepanel/pages/RankingCollector.vue) |
 | 分页抓取 + 每页随机 2–5 秒限速 + 取消 | ✅ | [adapter.ts](extension/src/modules/echotik/adapter.ts) |
 | 会员/访客权限限制识别，保留已抓数据并以 `PERMISSION_LIMIT` 结束（PARTIAL） | ✅ | [adapter.ts](extension/src/modules/echotik/adapter.ts)、[echotik-main.content.ts](extension/src/entrypoints/echotik-main.content.ts) |
-| 快照明细上传（`{value,raw}` → 数值转换）、快照历史/筛选/预设 | ✅ | [background.ts](extension/src/entrypoints/background.ts)、[RankingCollector.vue](extension/src/entrypoints/sidepanel/pages/RankingCollector.vue) |
-| 站点切换、周榜/月榜周期真机校准 | 🟡 | 依赖 EchoTik 真实页面会话 |
+| 快照明细上传（`{value,raw}` → 数值转换）、快照历史/筛选、按来源隔离的预设 | ✅ | [background.ts](extension/src/entrypoints/background.ts)、[RankingCollector.vue](extension/src/entrypoints/manager/pages/RankingCollector.vue) |
+| 国家/站点以 FastMoss 或 EchoTik 网页顶部选择器为唯一真值；进入、切换来源及预览/采集前自动同步 | ✅ | [RankingCollector.vue](extension/src/entrypoints/manager/pages/RankingCollector.vue)、对应 content script |
+| FastMoss 销量/热推/新品/带货视频榜抓取（通过页面请求模板回放） | 🟡 | [fastmoss](extension/src/modules/fastmoss)、真实站点会话校准 |
 
 ### 批次与任务
 
@@ -71,6 +72,11 @@ Chrome → `chrome://extensions` → 开发者模式 → 加载已解压的扩�
 | 去重：已采集商品不再开 TikTok 页，任务标 `SKIPPED` + “重复抓取”，支持单条「重新抓取」 | ✅ | [lease_service.py](server/app/services/lease_service.py)、[BatchTasks.vue](extension/src/entrypoints/sidepanel/pages/BatchTasks.vue) |
 | 批次响应携带榜单信息（站点/榜单/类型/类目/日期/快照条数） | ✅ | [routes_batches.py](server/app/api/routes_batches.py)、[BatchTasks.vue](extension/src/entrypoints/sidepanel/pages/BatchTasks.vue) |
 | 批次行「商品」/详情「查看商品」→ 商品列表自动带批次+站点+榜单过滤 | ✅ | [BatchTasks.vue](extension/src/entrypoints/sidepanel/pages/BatchTasks.vue)、[ProductList.vue](extension/src/entrypoints/sidepanel/pages/ProductList.vue) |
+| 活动批次列表自动刷新，完成后同步最新进度与终态 | ✅ | [BatchTasks.vue](extension/src/entrypoints/manager/pages/BatchTasks.vue) |
+
+### 管理员只读视图
+
+使用 `auth_users.role=ADMIN` 的认证 Token（例如已配置的 `admin-token-001`）时，批次、商品及“历史榜单”均可跨客户端查看。历史榜单会显示所属客户端；管理员界面不提供跨账号的重新采集、建批或批量执行操作。普通用户始终只能读取自身数据。
 | 每轮 upsert 失败/成功的 attempt 证据上报 | 🟡 | 上报字段已修正为 `evidence`，待真机确认落库 |
 
 ### 商品列表
