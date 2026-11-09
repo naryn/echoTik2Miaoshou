@@ -15,6 +15,7 @@ import {
   outboxEnqueue,
   outboxPending,
   saveClientIdentity,
+  FIXED_SERVER_URL,
   storageGet,
   storageGetMany,
   storageSet,
@@ -49,7 +50,7 @@ import {
   type TaskStatus,
 } from '@/shared/types';
 
-const EXT_VERSION = '0.1.0';
+const EXT_VERSION = '0.1.2';
 const ALARM_TICK = 'echotik-tick';
 
 /** 按运行浏览器的本地日历获取昨日，日榜只请求已完整结算的日期。 */
@@ -59,6 +60,16 @@ function yesterdayDate(): string {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${date.getFullYear()}-${month}-${day}`;
+}
+
+/** 仅比较数字语义版本；发布版本均使用 major.minor.patch。 */
+function isVersionNewer(candidate: string, current: string): boolean {
+  const c = candidate.split('.').map((part) => Number(part) || 0);
+  const v = current.split('.').map((part) => Number(part) || 0);
+  for (let index = 0; index < Math.max(c.length, v.length); index += 1) {
+    if ((c[index] ?? 0) !== (v[index] ?? 0)) return (c[index] ?? 0) > (v[index] ?? 0);
+  }
+  return false;
 }
 
 /**
@@ -176,7 +187,8 @@ export default defineBackground(() => {
    */
   function getApi(): ApiClient {
     return (cachedApi ??= createApiClient({
-      getBaseUrl: () => storageGet('server_url'),
+      // 服务地址内置，避免旧版本地存储或界面输入把请求发往错误环境。
+      getBaseUrl: async () => FIXED_SERVER_URL,
       getAuth: async () => {
         const s = await storageGetMany(['client_id', 'client_token']);
         return { client_id: s.client_id, client_token: s.client_token };
@@ -1225,7 +1237,7 @@ export default defineBackground(() => {
       // ---- 认证 Token（插件设置填写，Bearer 认证）----
       'auth.me': wrapHandler<'auth.me'>(async () => {
         const token = await storageGet('auth_token');
-        if (!token) throw new ApiError(ERROR_CODES.SERVER_UNAUTHORIZED, '请先在设置页填写认证 Token');
+        if (!token) throw new ApiError(ERROR_CODES.SERVER_UNAUTHORIZED, '请先完成激活认证');
         return fetchAuthIdentity();
       }),
       'auth.setToken': wrapHandler<'auth.setToken'>(async (payload) => {
@@ -1256,8 +1268,14 @@ export default defineBackground(() => {
         return { connected: true, latency_ms: Date.now() - t0 };
       }),
       'client.updateServerUrl': wrapHandler<'client.updateServerUrl'>(async (payload) => {
-        await storageSet('server_url', payload.server_url);
+        // 兼容旧消息调用，但不允许覆写内置的生产服务地址。
+        void payload;
+        await storageSet('server_url', FIXED_SERVER_URL);
         return { saved: true as const };
+      }),
+      'plugin.checkUpdate': wrapHandler<'plugin.checkUpdate'>(async () => {
+        const update = await getApi().pluginUpdate();
+        return { ...update, update_available: isVersionNewer(update.version, EXT_VERSION) };
       }),
       'runner.start': wrapHandler<'runner.start'>(async (payload) => {
         await getApi().batchAction(payload.batchId, 'start', { client_id: await storageGet('client_id') });

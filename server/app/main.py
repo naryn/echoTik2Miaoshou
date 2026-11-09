@@ -2,13 +2,16 @@
 
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
-from app.api import routes_admin, routes_auth, routes_batches, routes_clients, routes_rank, routes_tasks
+from app.api import routes_admin, routes_auth, routes_batches, routes_clients, routes_pricing, routes_rank, routes_tasks
 from app.api.deps import error_body, ok, set_request_id
 from app.config import CORS_ALLOW_ORIGINS
 from app.db import init_db
@@ -25,6 +28,10 @@ async def lifespan(_app: FastAPI):
 def create_app() -> FastAPI:
     """创建并配置 FastAPI 应用实例。"""
     app = FastAPI(title="EchoTik Collector Server", version="1.0.0", lifespan=lifespan)
+    static_dir = Path(__file__).parent / "static"
+    app.mount("/pricing-assets", StaticFiles(directory=static_dir), name="pricing-assets")
+    plugin_dir = static_dir / "plugins"
+    app.mount("/plugin-download", StaticFiles(directory=plugin_dir), name="plugin-download")
 
     app.add_middleware(
         CORSMiddleware,
@@ -33,6 +40,14 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def normalize_leading_slashes(request: Request, call_next):
+        """兼容客户端把以 / 结尾的服务地址与 API 路径直接拼接的情况。"""
+        path = request.scope["path"]
+        if path.startswith("//"):
+            request.scope["path"] = "/" + path.lstrip("/")
+        return await call_next(request)
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
@@ -69,12 +84,29 @@ def create_app() -> FastAPI:
         """健康检查。"""
         return ok({"status": "ok"})
 
+    @app.get("/pricing", include_in_schema=False)
+    def pricing_page():
+        """由 FastAPI 托管的 MX POP 定价网页；计算结果来自后端 API。"""
+        return FileResponse(static_dir / "pricing.html")
+
+    @app.get("/v1/plugin-update")
+    def plugin_update():
+        """返回当前可手动安装的插件版本与下载地址。"""
+        return ok(
+            {
+                "version": "0.1.2",
+                "download_url": "http://39.102.73.231:8010/plugin-download/echotik-miaoshou-collector-0.1.2-chrome.zip",
+                "notes": "",
+            }
+        )
+
     app.include_router(routes_clients.router)
     app.include_router(routes_auth.router)
     app.include_router(routes_rank.router)
     app.include_router(routes_batches.router)
     app.include_router(routes_tasks.router)
     app.include_router(routes_admin.router)
+    app.include_router(routes_pricing.router)
     return app
 
 

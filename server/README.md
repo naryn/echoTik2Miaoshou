@@ -123,6 +123,39 @@ sqlite3 server/data/echotik.db \
 
 ## 测试
 
+## MX POP 定价服务与 MCP
+
+后端提供无状态定价接口，不依赖数据库或账号认证：
+
+```text
+POST /v1/pricing/crossborder/quote
+```
+
+请求传入 `product_cost_rmb`、`quantity`、`unit_chargeable_weight_kg` 等参数，响应同时包含推荐售价、固定成本、毛利/毛利率、销售变动费用、净利/净利率和 RMB 参考值。百分比字段按 `0–100` 传递。
+
+同时提供标准 stdio MCP 工具入口，任何兼容 MCP 的 agent 可配置为：
+
+```json
+{
+  "command": "/absolute/path/to/server/.venv/bin/python",
+  "args": ["-m", "app.mcp.pricing_mcp"],
+  "cwd": "/absolute/path/to/server"
+}
+```
+
+可用工具：
+
+- `mx_pop_crossborder_quote`：跨境直邮正向定价与利润结构
+- `mx_pop_chargeable_weight`：体积重/计泡判断
+
+示例 REST 请求：
+
+```bash
+curl -X POST http://localhost:8000/v1/pricing/crossborder/quote \
+  -H 'Content-Type: application/json' \
+  -d '{"product_cost_rmb":15,"quantity":1,"unit_chargeable_weight_kg":0.2}'
+```
+
 ```bash
 cd server
 .venv/bin/python -m pytest -q

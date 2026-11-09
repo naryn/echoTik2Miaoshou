@@ -75,6 +75,12 @@ export class ApiError extends Error {
   }
 }
 
+export interface PluginUpdateInfo {
+  version: string;
+  download_url: string;
+  notes: string;
+}
+
 /** 客户端配置 */
 export interface ApiClientOptions {
   /** 惰性获取 base URL（支持设置页动态修改后生效，无需重建客户端） */
@@ -415,6 +421,11 @@ export function createApiClient(opts: ApiClientOptions) {
     /** 查询当前 auth token 对应的账号、角色与共享客户端 ID */
     authMe() {
       return request('GET', '/v1/auth/me', null, AuthMeSchema, false) as Promise<AuthMe>;
+    },
+
+    /** 查询内置服务当前发布的插件版本与手动下载地址。 */
+    pluginUpdate() {
+      return request('GET', '/v1/plugin-update', null, null, false) as Promise<PluginUpdateInfo>;
     },
 
     // ---- 管理员（auth_users.role=ADMIN，只读）----

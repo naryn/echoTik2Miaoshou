@@ -7,7 +7,6 @@
 import { computed, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { locateWorkerTab, pauseRunner, refreshState, resumeRunner, setAuthToken, store } from './store';
-import { sendMsg } from '@/shared/messaging';
 import { storageGet } from '@/modules/storage';
 
 const route = useRoute();
@@ -17,36 +16,31 @@ const confirmCancel = ref(false);
 /** 操作进行中 */
 const acting = ref(false);
 
-/** 是否已通过认证 Token 授权 */
+/** 是否已完成激活认证 */
 const authorized = computed(() => !!store.state?.authorized);
 /** 授权页输入 */
 const authInput = ref('');
-const serverInput = ref('');
 const authBusy = ref(false);
 const authError = ref<string | null>(null);
 
 onMounted(async () => {
   authInput.value = (await storageGet('auth_token')) ?? '';
-  serverInput.value = await storageGet('server_url');
 });
 
 /**
- * 激活授权：保存服务器地址并验证认证 Token
+ * 激活授权：验证激活认证码
  */
 async function activate(): Promise<void> {
   const token = authInput.value.trim();
   if (!token) {
-    authError.value = '请输入认证 Token';
+    authError.value = '请输入激活认证码';
     return;
   }
   authBusy.value = true;
   authError.value = null;
   try {
-    if (serverInput.value.trim()) {
-      await sendMsg('client.updateServerUrl', { server_url: serverInput.value.trim() });
-    }
     await setAuthToken(token);
-    if (!store.state?.authorized) authError.value = '认证 Token 无效或已停用';
+    if (!store.state?.authorized) authError.value = '激活认证码无效或已停用';
   } catch (e) {
     authError.value = (e as Error).message;
   } finally {
@@ -134,17 +128,13 @@ async function doCancel(): Promise<void> {
     </nav>
 
     <main class="app-main">
-      <!-- 未授权：插件不可用，必须先填写认证 Token -->
+      <!-- 未授权：插件不可用，必须先完成激活认证 -->
       <div v-if="store.state && !authorized" class="card" style="margin-top: 12px">
-        <h3>需要授权</h3>
-        <p class="small muted">请填写认证 Token 后开始使用。</p>
+        <h3>激活认证</h3>
+        <p class="small muted">请输入激活认证码后开始使用。</p>
         <div class="form-row">
-          <label>服务器</label>
-          <input v-model="serverInput" placeholder="http://127.0.0.1:8000" />
-        </div>
-        <div class="form-row">
-          <label>认证 Token</label>
-          <input v-model="authInput" type="password" placeholder="输入认证 Token" @keyup.enter="activate" />
+          <label>激活认证</label>
+          <input v-model="authInput" type="password" placeholder="输入激活认证码" @keyup.enter="activate" />
         </div>
         <div class="btn-row">
           <button class="primary" :disabled="authBusy" @click="activate">{{ authBusy ? '验证中…' : '激活' }}</button>

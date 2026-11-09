@@ -51,7 +51,7 @@ const alerts = computed(() => {
     list.push({
       kind: '远端离线',
       text: '远程服务器不可达，结果与进度将缓存至本地 outbox',
-      advice: '检查网络与远程地址（设置页可测试连接）；恢复后会自动幂等补传，不会重复采集。',
+      advice: '检查网络与服务连接状态（可在设置页测试连接）；恢复后会自动幂等补传，不会重复采集。',
     });
   }
   if (env.value && !env.value.echotik.tab_found) {

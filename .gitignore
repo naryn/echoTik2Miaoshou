@@ -16,6 +16,7 @@ server/data/*.db-shm
 # 环境与密钥
 .env
 .env.local
+server/.key
 
 # 系统与编辑器
 .DS_Store
@@ -23,3 +24,6 @@ server/data/*.db-shm
 
 # 临时分享产物
 .trae-html-share-packages/
+
+# 独立的定价网页仓库（含自身 .git），不纳入本仓库
+mx-pop-pricing-web/

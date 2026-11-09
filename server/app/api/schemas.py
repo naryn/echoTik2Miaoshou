@@ -171,6 +171,43 @@ class ResultSubmitRequest(BaseModel):
     elapsed_ms: int | None = None
 
 
+class CrossBorderPricingRequest(BaseModel):
+    """MX POP 跨境直邮正向定价参数。百分比字段均使用 0–100 的输入口径。"""
+
+    product_cost_rmb: float = Field(ge=0, description="单件商品成本，人民币")
+    domestic_extra_cost_rmb: float = Field(default=2, ge=0, description="单件境内附加成本，人民币")
+    mxn_per_rmb: float = Field(default=2.78, gt=0, description="汇率：1 RMB 对应多少 MXN")
+    quantity: int = Field(default=1, ge=1, le=100, description="每单商品件数")
+    unit_chargeable_weight_kg: float = Field(gt=0, le=30, description="单件计费重量，kg")
+    target_net_margin_pct: float = Field(default=20, ge=0, lt=90, description="目标净利率，百分比")
+    merchant_discount_pct: float = Field(default=50, ge=0, lt=90, description="商家折扣率，百分比")
+    new_customer_discount_pct: float = Field(default=0, ge=0, lt=90, description="新客折扣率，百分比")
+    affiliate_commission_pct: float = Field(default=0, ge=0, lt=90, description="达人佣金率，百分比")
+    advertising_pct: float = Field(default=0, ge=0, lt=90, description="预计广告投入率，百分比")
+    buyer_shipping_paid_per_item_mxn: float = Field(default=50, ge=0, description="买家预计多付运费，用于上新原价参考")
+
+
+class ReverseCostRequest(BaseModel):
+    """已知折后售价时，反推可承受商品成本。"""
+
+    sale_price_mxn: float = Field(gt=0)
+    quantity: int = Field(default=1, ge=1, le=100)
+    unit_chargeable_weight_kg: float = Field(gt=0, le=30)
+    target_net_margin_pct: float = Field(default=10, ge=0, lt=90)
+    merchant_discount_pct: float = Field(default=50, ge=0, lt=90)
+    new_customer_discount_pct: float = Field(default=0, ge=0, lt=90)
+    affiliate_commission_pct: float = Field(default=10, ge=0, lt=90)
+    advertising_pct: float = Field(default=0, ge=0, lt=90)
+    mxn_per_rmb: float = Field(default=2.78, gt=0)
+
+
+class ChargeableWeightRequest(BaseModel):
+    length_cm: float = Field(ge=0)
+    width_cm: float = Field(ge=0)
+    height_cm: float = Field(ge=0)
+    actual_weight_kg: float = Field(gt=0)
+
+
 # ---------- 序列化 ----------
 
 

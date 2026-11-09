@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 设置页 Settings（规范 §3.7）
- * - 客户端卡：client_id（只读可复制）/名称/版本/注册时间/最后同步/远程地址编辑+连接测试/重新绑定（二次确认）
+ * - 客户端卡：client_id（只读可复制）/名称/版本/注册时间/最后同步/服务连接测试
  * - EchoTik 卡：登录状态检测、适配器版本、字段映射检查入口
  * - TikTok/妙手卡：工作 Tab 选择、妙手选择器版本、测试采集流程入口（PoC 待验证）
  * - 执行参数：任务间隔 min/max（默认 15–30s）/单批上限/页面等待超时/按钮检测超时/提交结果等待/失败最大重试次数
@@ -24,9 +24,7 @@ const ADAPTER_VERSION = 'echotik-web-adapter/0.1';
 /** 远程客户端信息 */
 const me = ref<ClientMe | null>(null);
 /** 本地身份信息 */
-const localInfo = ref({ client_id: null as string | null, registered_at: null as string | null, server_url: '' });
-/** 远程地址编辑 */
-const serverUrlEdit = ref('');
+const localInfo = ref({ client_id: null as string | null, registered_at: null as string | null });
 /** 环境探测 */
 const env = ref<MessageMap['env.check']['res'] | null>(null);
 const envLoading = ref(false);
@@ -47,22 +45,25 @@ const errorText = ref<string | null>(null);
 const pocResult = ref<string | null>(null);
 const pocRunning = ref(false);
 
-// ---------------- 认证 Token（服务器 auth_users 表内配置） ----------------
-/** 认证 Token 输入 */
+// ---------------- 激活认证（服务器 auth_users 表内配置） ----------------
+/** 激活认证码输入 */
 const authTokenEdit = ref('');
 /** 验证中 */
 const authBusy = ref(false);
 /** 切换结果 */
 const authResult = ref<string | null>(null);
+/** 插件更新检测 */
+const updateBusy = ref(false);
+const updateResult = ref<{ version: string; download_url: string; notes: string; update_available: boolean } | null>(null);
 
 /**
- * 保存并验证认证 Token；服务端按 token 返回角色（USER/ADMIN）
+ * 保存并验证激活认证码；服务端按 token 返回角色（USER/ADMIN）
  */
 async function saveAuth(): Promise<void> {
   errorText.value = null;
   const token = authTokenEdit.value.trim();
   if (!token) {
-    errorText.value = '请输入认证 Token';
+    errorText.value = '请输入激活认证码';
     return;
   }
   authBusy.value = true;
@@ -71,11 +72,11 @@ async function saveAuth(): Promise<void> {
     await loadMe();
     await refreshState();
     const role = store.state?.role === 'ADMIN' ? '管理员' : '普通用户';
-    authResult.value = `认证成功：${role}（${store.state?.display_name ?? store.state?.client_id?.slice(0, 8) ?? ''}）`;
-    feedback.value = '认证 Token 已保存。';
+    authResult.value = `激活认证成功：${role}（${store.state?.display_name ?? store.state?.client_id?.slice(0, 8) ?? ''}）`;
+    feedback.value = '激活认证已保存。';
   } catch (e) {
     authResult.value = null;
-    errorText.value = `认证失败：${classifyError(e).text}`;
+    errorText.value = `激活认证失败：${classifyError(e).text}`;
     authTokenEdit.value = store.authToken ?? '';
   } finally {
     authBusy.value = false;
@@ -83,13 +84,13 @@ async function saveAuth(): Promise<void> {
 }
 
 /**
- * 退出授权：清除本机认证 Token，插件回到未授权状态
+ * 退出授权：清除本机激活认证，插件回到未授权状态
  */
 async function logoutAuth(): Promise<void> {
   await clearAuthToken();
   authTokenEdit.value = '';
   authResult.value = '已退出授权。';
-  feedback.value = '认证 Token 已清除。';
+  feedback.value = '激活认证已清除。';
 }
 
 /**
@@ -115,19 +116,22 @@ async function testConnection(): Promise<void> {
   }
 }
 
-/**
- * 保存远程地址（保存后提示连接测试结果）
- */
-async function saveServerUrl(): Promise<void> {
-  const url = serverUrlEdit.value.trim();
-  if (!/^https?:\/\//.test(url)) {
-    errorText.value = '远程地址格式不正确（需以 http(s):// 开头）';
-    return;
+/** 向内置服务查询最新发布版本；Chrome 本地安装插件需手动下载并替换。 */
+async function checkPluginUpdate(): Promise<void> {
+  updateBusy.value = true;
+  errorText.value = null;
+  try {
+    updateResult.value = await sendMsg('plugin.checkUpdate', undefined);
+  } catch (e) {
+    errorText.value = `更新检测失败：${classifyError(e).text}`;
+  } finally {
+    updateBusy.value = false;
   }
-  await storageSet('server_url', url);
-  localInfo.value.server_url = url;
-  feedback.value = '远程地址已保存，正在测试连接…';
-  await testConnection();
+}
+
+async function downloadPluginUpdate(): Promise<void> {
+  if (!updateResult.value?.download_url) return;
+  await browser.tabs.create({ url: updateResult.value.download_url });
 }
 
 /**
@@ -239,7 +243,6 @@ async function exportDiagnostics(): Promise<void> {
     exported_at: new Date().toISOString(),
     version: ADAPTER_VERSION,
     state: { ...store.state, client_id: store.state?.client_id ? '[redacted-id]' : null },
-    server_url: localInfo.value.server_url,
     exec_config: exec.value,
     behavior_config: behavior.value,
     outbox_pending: dataStats.value.outbox,
@@ -298,9 +301,7 @@ onMounted(async () => {
   localInfo.value = {
     client_id: await storageGet('client_id'),
     registered_at: await storageGet('registered_at'),
-    server_url: await storageGet('server_url'),
   };
-  serverUrlEdit.value = localInfo.value.server_url;
   // 回填当前认证 Token，便于切换或退出
   authTokenEdit.value = (await storageGet('auth_token')) ?? '';
   exec.value = await loadExecConfig();
@@ -314,23 +315,39 @@ onMounted(async () => {
     <div v-if="errorText" class="alert-bar err">{{ errorText }}</div>
     <div v-if="feedback" class="alert-bar" style="background:#f0fdf4;border-color:#bbf7d0;color:#166534">{{ feedback }}</div>
 
-    <!-- 认证 Token 卡：服务端 auth_users 表配置，同一 token 跨浏览器共享数据 -->
+    <!-- 激活认证卡：服务端 auth_users 表配置，同一凭据跨浏览器共享数据 -->
     <div class="card">
-      <h3>认证 Token
+      <h3>激活认证
         <span :class="store.state?.role === 'ADMIN' ? 'badge ok' : 'badge warn'">
           {{ store.state?.role === 'ADMIN' ? '管理员' : store.state?.authorized ? '普通用户' : '未授权' }}
         </span>
       </h3>
-      <p class="small muted" style="margin-top: 0">
-        管理员可查看所有账号数据，普通用户只能查看自己的数据。
-      </p>
       <div class="form-row">
-        <label>认证 Token</label>
-        <input v-model="authTokenEdit" type="password" placeholder="输入认证 Token" @keyup.enter="saveAuth" />
-        <button class="act" :disabled="authBusy" @click="saveAuth">{{ authBusy ? '验证中…' : '保存并验证' }}</button>
+        <label>激活认证</label>
+        <input v-model="authTokenEdit" type="password" placeholder="输入激活认证码" @keyup.enter="saveAuth" />
+        <button class="act" :disabled="authBusy" @click="saveAuth">{{ authBusy ? '验证中…' : '更新认证' }}</button>
         <button v-if="store.state?.authorized" class="act danger" @click="logoutAuth">退出授权</button>
       </div>
       <p v-if="authResult" class="small muted" style="margin-bottom: 0">{{ authResult }}</p>
+    </div>
+
+    <div class="card">
+      <h3>插件更新</h3>
+      <div class="form-row">
+        <label>当前版本</label>
+        <span class="mono">{{ browser.runtime.getManifest().version }}</span>
+        <button class="act" :disabled="updateBusy" @click="checkPluginUpdate">{{ updateBusy ? '检测中…' : '检测更新' }}</button>
+      </div>
+      <template v-if="updateResult">
+        <p class="small" style="margin-bottom: 4px">
+          {{ updateResult.update_available ? `发现新版本 v${updateResult.version}` : '当前已是最新版本' }}
+        </p>
+        <p v-if="updateResult.notes" class="small muted" style="margin: 0 0 6px">{{ updateResult.notes }}</p>
+        <button v-if="updateResult.update_available" class="act" @click="downloadPluginUpdate">下载更新包</button>
+        <p v-if="updateResult.update_available" class="small muted" style="margin: 6px 0 0">
+          下载后请在 Chrome 扩展程序页手动替换或重新加载插件。
+        </p>
+      </template>
     </div>
 
     <!-- 客户端卡 -->
@@ -342,14 +359,12 @@ onMounted(async () => {
         <button v-if="localInfo.client_id" class="link" @click="copyText(localInfo.client_id!)">复制</button>
       </div>
       <div class="small">名称：{{ me?.display_name ?? store.state?.display_name ?? '—' }}</div>
-      <div class="small">角色：{{ store.state?.role === 'ADMIN' ? '管理员' : '普通用户（仅看自己）' }}</div>
+      <div class="small">角色：{{ store.state?.role === 'ADMIN' ? '管理员' : '普通用户' }}</div>
       <div class="small">扩展版本：{{ me?.extension_version ?? ADAPTER_VERSION }}</div>
       <div class="small">注册时间：{{ formatTime(localInfo.registered_at ?? me?.registered_at) }}</div>
       <div class="small">最后同步：{{ formatTime(me?.last_seen_at) }}</div>
       <div class="form-row" style="margin-top: 8px">
-        <label>远程地址</label>
-        <input v-model="serverUrlEdit" placeholder="http://localhost:8001" />
-        <button class="act" @click="saveServerUrl">保存</button>
+        <label>服务连接</label>
         <button class="act" @click="testConnection">连接测试</button>
       </div>
     </div>

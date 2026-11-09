@@ -49,6 +49,7 @@ export interface MessageMap {
   'client.getState': { req: void; res: RuntimePublicState };
   'client.testConnection': { req: void; res: { connected: boolean; latency_ms: number } };
   'client.updateServerUrl': { req: { server_url: string }; res: { saved: true } };
+  'plugin.checkUpdate': { req: void; res: { version: string; download_url: string; notes: string; update_available: boolean } };
   'runner.start': { req: { batchId: string }; res: { started: true } };
   'runner.pause': { req: void; res: { paused: true } };
   'runner.resume': { req: void; res: { resumed: true } };

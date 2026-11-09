@@ -14,12 +14,16 @@ import type {
 } from '@/shared/types';
 import { DEFAULT_BEHAVIOR_CONFIG, DEFAULT_EXEC_CONFIG } from '@/shared/types';
 
+/** 插件内置的生产 API 地址；不向最终用户开放编辑入口。 */
+export const FIXED_SERVER_URL = 'http://39.102.73.231:8010';
+
 /** chrome.storage.local 键名与默认值表（类型化 schema） */
 export const STORAGE_DEFAULTS = {
   install_id: null as string | null,
   client_id: null as string | null,
   client_token: null as string | null,
-  server_url: 'http://localhost:8001' as string,
+  /** 保留该键仅为兼容既有身份数据；实际请求始终使用 FIXED_SERVER_URL。 */
+  server_url: FIXED_SERVER_URL as string,
   registered_at: null as string | null,
   worker_tab_id: null as number | null,
   active_batch_id: null as string | null,

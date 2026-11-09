@@ -98,7 +98,7 @@ def test_admin_reads_all_clients(client, db_session, admin_headers):
     snapshot_a = make_snapshot_with_entries(
         client, headers_a, n=2, request_id="snap-a", external_prefix="A170"
     )
-    make_snapshot_with_entries(
+    snapshot_b = make_snapshot_with_entries(
         client, headers_b, n=2, request_id="snap-b", external_prefix="B170"
     )
     ids_a = list_product_ids(client, headers_a)
