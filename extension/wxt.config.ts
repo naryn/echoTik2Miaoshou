@@ -24,6 +24,8 @@ export default defineConfig({
       'https://shop.tiktok.com/*',
       'http://localhost:8000/*',
       'http://localhost:8001/*',
+      // 全站图片收集：任意网页图片右上角上传按钮所需的下载权限
+      '<all_urls>',
     ],
     icons: {
       16: 'icons/icon-16.png',
