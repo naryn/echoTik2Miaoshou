@@ -105,10 +105,10 @@ export function taskStatusText(task: { status: string; last_error_code?: string 
  */
 export function classifyError(e: unknown): { kind: string; text: string } {
   const msg = e instanceof Error ? e.message : String(e);
-  if (msg.includes('ECHOTIK_PERMISSION_LIMIT')) {
+  if (msg.includes('ECHOTIK_PERMISSION_LIMIT') || msg.includes('会员权限限制')) {
     return {
       kind: 'echotik-permission',
-      text: '当前 EchoTik 账号为免费/访客权限，可查看的榜单条数有限；已抓取到的数据会保留并标记为部分完成。',
+      text: '当前 EchoTik 账号为游客/免费权限（会员可能已过期），可查看的榜单条数有限；已抓取的数据会保留，请登录有效会员账号或续费后重试。',
     };
   }
   if (msg.includes('ECHOTIK_UNAUTHORIZED')) {

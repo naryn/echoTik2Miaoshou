@@ -107,6 +107,7 @@ async function doCancel(): Promise<void> {
       <span v-if="store.state?.display_name" class="client-id">{{ store.state.display_name }}</span>
       <span :class="connClass" :title="connText"></span>
       <span class="client-id">{{ connText }}</span>
+      <span class="support-contact">技术支持微信：18650802097</span>
     </header>
 
     <nav v-if="authorized" class="app-nav">

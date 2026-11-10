@@ -34,5 +34,14 @@ async function openPanel(): Promise<void> {
     </div>
     <div class="row" v-if="state?.waiting_verification" style="color: #f59e0b">等待人工验证</div>
     <button @click="openPanel">打开管理台</button>
+    <p class="support">技术支持微信：18650802097</p>
   </div>
 </template>
+
+<style scoped>
+.support {
+  margin: 12px 0 0;
+  color: #6b7280;
+  font-size: 12px;
+}
+</style>

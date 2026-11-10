@@ -318,6 +318,7 @@ const REASON_TEXT: Record<string, string> = {
   UPLOAD_PARTIAL: '部分上传失败（标 PARTIAL）',
   REFRESHING_FASTMOSS: '正在刷新 FastMoss 榜单页并检查验证状态',
   WAITING_VERIFICATION: 'FastMoss 出现滑块/人机验证；请在 FastMoss 页面完成验证后重新获取',
+  FAILED: '采集失败（失败原因见批量采集提示）',
 };
 
 // ---------------- 运行/预览/预设状态 ----------------
@@ -346,7 +347,18 @@ const presets = ref<RankingPreset[]>([]);
 const presetName = ref('');
 const selectedPresetIds = ref<string[]>([]);
 const presetBatchRunning = ref(false);
-const presetBatchStatus = ref({ running: false, current: 0, total: 0, completed: 0, failed: 0 });
+const presetBatchStatus = ref<{
+  running: boolean;
+  current: number;
+  total: number;
+  completed: number;
+  failed: number;
+  errors: string[];
+}>({ running: false, current: 0, total: 0, completed: 0, failed: 0, errors: [] });
+/** 批量预设失败原因（去重后转为用户可读文案） */
+const presetBatchFailedReasons = computed(() =>
+  [...new Set(presetBatchStatus.value.errors.map((e) => classifyError(e).text))],
+);
 const presetsLoading = ref(false);
 const presetsExpanded = ref(false);
 const allPresetsSelected = computed(
@@ -684,7 +696,7 @@ async function runSelectedPresets(): Promise<void> {
   errorText.value = null;
   try {
     await sendMsg('ranking.runPresetBatch', { queries: selected.map((p) => p.query_json as unknown as RankingQuery) });
-    presetBatchStatus.value = { running: true, current: 0, total: selected.length, completed: 0, failed: 0 };
+    presetBatchStatus.value = { running: true, current: 0, total: selected.length, completed: 0, failed: 0, errors: [] };
     if (presetBatchTimer) clearInterval(presetBatchTimer);
     presetBatchTimer = setInterval(pollPresetBatch, 800);
     feedback.value = `已启动 ${selected.length} 个预设的顺序采集；每项完成后自动继续下一项。`;
@@ -1048,6 +1060,13 @@ onUnmounted(() => {
       <p v-if="presetBatchStatus.running || presetBatchStatus.total" class="muted small" style="margin:8px 0 0">
         批量采集：第 {{ presetBatchStatus.current }} / {{ presetBatchStatus.total }} 项 · 已完成 {{ presetBatchStatus.completed }} · 失败 {{ presetBatchStatus.failed }}
       </p>
+      <ul
+        v-if="presetBatchStatus.failed && presetBatchFailedReasons.length"
+        class="muted small"
+        style="margin:4px 0 0;padding-left:18px"
+      >
+        <li v-for="(reason, idx) in presetBatchFailedReasons" :key="idx">失败原因：{{ reason }}</li>
+      </ul>
     </div>
 
     <!-- 桥接自检结果 -->

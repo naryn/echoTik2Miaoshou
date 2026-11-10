@@ -735,7 +735,7 @@ export default defineBackground(() => {
 
   let rankingProgress = { running: false, fetched: 0, limit: 0, page: 0, done: false, reason: '' };
   let rankingCancelled = false;
-  let presetBatchProgress = { running: false, current: 0, total: 0, completed: 0, failed: 0 };
+  let presetBatchProgress = { running: false, current: 0, total: 0, completed: 0, failed: 0, errors: [] as string[] };
 
   /**
    * 执行榜单抓取：EchoTik 分页 → 远程快照（部分上传失败保留 PARTIAL）
@@ -1313,15 +1313,25 @@ export default defineBackground(() => {
       'ranking.runPresetBatch': wrapHandler<'ranking.runPresetBatch'>(async (payload) => {
         if (presetBatchProgress.running || rankingProgress.running) throw new Error('已有榜单采集正在执行');
         if (!payload.queries.length) throw new Error('请至少选择一个筛选预设');
-        presetBatchProgress = { running: true, current: 0, total: payload.queries.length, completed: 0, failed: 0 };
+        presetBatchProgress = { running: true, current: 0, total: payload.queries.length, completed: 0, failed: 0, errors: [] };
         void (async () => {
           for (let i = 0; i < payload.queries.length; i++) {
             presetBatchProgress = { ...presetBatchProgress, current: i + 1 };
             try {
               await runRankingCollect(withYesterdayForDailyPreset(payload.queries[i]!));
               presetBatchProgress = { ...presetBatchProgress, completed: presetBatchProgress.completed + 1 };
-            } catch {
-              presetBatchProgress = { ...presetBatchProgress, failed: presetBatchProgress.failed + 1 };
+            } catch (e) {
+              const message = e instanceof Error ? e.message : String(e);
+              presetBatchProgress = {
+                ...presetBatchProgress,
+                failed: presetBatchProgress.failed + 1,
+                // 同一原因只保留一次，便于面板直接展示失败原因
+                errors: presetBatchProgress.errors.includes(message)
+                  ? presetBatchProgress.errors
+                  : [...presetBatchProgress.errors, message],
+              };
+              // 采集异常会导致 rankingProgress 停留在 running，复位后才能重试
+              rankingProgress = { ...rankingProgress, running: false, done: true, reason: 'FAILED' };
             }
           }
           presetBatchProgress = { ...presetBatchProgress, running: false };

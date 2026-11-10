@@ -15,6 +15,7 @@ body {
 }
 .app-header h1 { font-size: 16px; margin: 0; flex: 1; }
 .client-id { font-size: 11px; color: #6b7280; }
+.support-contact { font-size: 11px; color: #2563eb; white-space: nowrap; }
 .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: #d1d5db; display: inline-block; margin-right: 4px; }
 .conn-dot.on { background: #22c55e; }
 .conn-dot.off { background: #ef4444; }
@@ -225,6 +226,7 @@ table.list tr:hover td { background: #f9fafb; }
   body { min-width: 360px; }
   .app-header { padding: 10px 14px; gap: 6px; }
   .client-id { display: none; }
+  .support-contact { font-size: 10px; }
   .app-nav { padding: 6px 10px; overflow-x: auto; }
   .app-nav a { flex: 0 0 auto; min-width: 74px; padding: 6px 8px; }
   .app-main { padding: 14px; }

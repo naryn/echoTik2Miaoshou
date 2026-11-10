@@ -57,7 +57,7 @@ export interface MessageMap {
   'runner.getCheckpoint': { req: void; res: RunnerCheckpoint };
   'ranking.startCollect': { req: { query: RankingQuery }; res: { snapshot_local_id: string } };
   'ranking.runPresetBatch': { req: { queries: RankingQuery[] }; res: { started: number } };
-  'ranking.presetBatchProgress': { req: void; res: { running: boolean; current: number; total: number; completed: number; failed: number } };
+  'ranking.presetBatchProgress': { req: void; res: { running: boolean; current: number; total: number; completed: number; failed: number; errors: string[] } };
   'rankingPreset.list': { req: { source: RankingSource }; res: { items: RankingPreset[] } };
   'rankingPreset.save': { req: { name: string; query: RankingQuery; source: RankingSource }; res: RankingPreset };
   'rankingPreset.delete': { req: { preset_id: string }; res: { deleted: boolean } };
