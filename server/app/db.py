@@ -81,6 +81,28 @@ def _ensure_source_platform_column(table_name: str, index_name: str | None = Non
             )
 
 
+def _ensure_auth_user_session_columns() -> None:
+    """为旧库 auth_users 补充单设备登录会话字段（SQLite 无迁移框架，幂等执行）。"""
+    inspector = inspect(engine)
+    if "auth_users" not in inspector.get_table_names():
+        return
+    existing = {col["name"] for col in inspector.get_columns("auth_users")}
+    additions = {
+        "active_device_id": "VARCHAR(64)",
+        "active_session_id": "VARCHAR(128)",
+        "session_started_at": "DATETIME",
+    }
+    with engine.begin() as conn:
+        for column, ddl in additions.items():
+            if column in existing:
+                continue
+            try:
+                conn.execute(text(f"ALTER TABLE auth_users ADD COLUMN {column} {ddl}"))
+            except OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
+
 def init_db() -> None:
     """创建全部数据表并对旧库做兼容迁移（幂等，可重复调用）。"""
     from app.models import Base
@@ -90,3 +112,4 @@ def init_db() -> None:
     _ensure_source_platform_column("rank_snapshots", "ix_rank_snapshots_source_platform")
     _ensure_source_platform_column("collection_batches")
     _ensure_source_platform_column("ranking_presets", "ix_ranking_presets_source_platform")
+    _ensure_auth_user_session_columns()

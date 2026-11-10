@@ -80,8 +80,8 @@ const loading = ref(false);
 const errorText = ref<string | null>(null);
 const feedback = ref<string | null>(null);
 
-/** 当前在大图预览中展示的商品图片 URL。 */
-const previewImageUrl = ref<string | null>(null);
+/** 当前在大图预览中展示的商品（保留商品上下文，预览内也可直接上传）。 */
+const previewProduct = ref<ProductItem | null>(null);
 
 /** 当前生效的跳转筛选标签（用于显式提示，避免被误认为没过滤） */
 const activeJumpFilters = computed(() => {
@@ -171,12 +171,41 @@ async function openTikTok(p: ProductItem): Promise<void> {
 }
 
 /** 打开商品图片大图预览。 */
-function openImagePreview(imageUrl?: string | null): void {
-  previewImageUrl.value = imageUrl?.trim() || null;
+function openImagePreview(p: ProductItem): void {
+  previewProduct.value = p;
 }
 
 /** 正在单件采集的商品 key（`region:external_product_id`） */
 const collectingKey = ref<string | null>(null);
+
+/** 正在上传图片的商品 key */
+const collectingImageKey = ref<string | null>(null);
+
+/**
+ * 收集图片：background 拉取图片字节后上传到服务端 collected_images
+ * @param p 商品
+ */
+async function collectImage(p: ProductItem): Promise<void> {
+  if (!p.image_url || collectingImageKey.value) return;
+  const key = `${p.region ?? ''}:${p.external_product_id}`;
+  collectingImageKey.value = key;
+  errorText.value = null;
+  feedback.value = null;
+  try {
+    const r = await sendMsg('product.collectImage', {
+      source_url: p.image_url,
+      product_id: p.id,
+      title: p.title ?? '',
+      region: p.region ?? '',
+      source_platform: p.source_platform ?? 'ECHOTIK',
+    });
+    feedback.value = r.deduped ? '该图片此前已收集，无需重复上传。' : '图片已上传到服务端。';
+  } catch (e) {
+    errorText.value = classifyError(e).text;
+  } finally {
+    collectingImageKey.value = null;
+  }
+}
 
 /**
  * 单件商品直接采集（测试 TikTok 详情页 + 妙手 ERP 链路）
@@ -373,13 +402,33 @@ onMounted(async () => {
           <tbody>
             <tr v-for="p in data.items" :key="p.id">
               <td>
-                <button
-                  v-if="p.image_url"
-                  class="image-preview-trigger"
-                  type="button"
-                  :aria-label="`预览${p.title || '商品'}图片`"
-                  @click="openImagePreview(p.image_url)"
-                ><img :src="p.image_url" class="thumb" :alt="p.title || '商品图片'" /></button>
+                <span v-if="p.image_url" class="thumb-cell">
+                  <button
+                    class="image-preview-trigger"
+                    type="button"
+                    :aria-label="`预览${p.title || '商品'}图片`"
+                    @click="openImagePreview(p)"
+                  ><img :src="p.image_url" class="thumb" :alt="p.title || '商品图片'" /></button>
+                  <button
+                    class="image-collect-btn"
+                    type="button"
+                    :disabled="collectingImageKey === `${p.region ?? ''}:${p.external_product_id}`"
+                    :title="collectingImageKey === `${p.region ?? ''}:${p.external_product_id}` ? '上传中…' : '上传图片到服务端'"
+                    :aria-label="`上传${p.title || '商品'}图片到服务端`"
+                    @click.stop="collectImage(p)"
+                  >
+                    <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true">
+                      <path
+                        d="M8 10V3m0 0L5.5 5.5M8 3l2.5 2.5M3 10.5V12a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5v-1.5"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.6"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      />
+                    </svg>
+                  </button>
+                </span>
                 <span v-else class="muted">—</span>
               </td>
               <td>
@@ -417,10 +466,29 @@ onMounted(async () => {
     </div>
 
     <!-- 商品图片大图预览 -->
-    <div v-if="previewImageUrl" class="image-preview-mask" role="dialog" aria-modal="true" aria-label="商品图片预览" @click.self="previewImageUrl = null">
+    <div v-if="previewProduct" class="image-preview-mask" role="dialog" aria-modal="true" aria-label="商品图片预览" @click.self="previewProduct = null">
       <div class="image-preview-box">
-        <button class="image-preview-close" type="button" aria-label="关闭图片预览" @click="previewImageUrl = null">×</button>
-        <img :src="previewImageUrl" alt="商品大图" />
+        <button
+          class="image-preview-collect"
+          type="button"
+          :disabled="collectingImageKey === `${previewProduct.region ?? ''}:${previewProduct.external_product_id}`"
+          :title="collectingImageKey === `${previewProduct.region ?? ''}:${previewProduct.external_product_id}` ? '上传中…' : '上传图片到服务端'"
+          aria-label="上传图片到服务端"
+          @click.stop="previewProduct && collectImage(previewProduct)"
+        >
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path
+              d="M8 10V3m0 0L5.5 5.5M8 3l2.5 2.5M3 10.5V12a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5v-1.5"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <button class="image-preview-close" type="button" aria-label="关闭图片预览" @click="previewProduct = null">×</button>
+        <img :src="previewProduct.image_url" alt="商品大图" />
       </div>
     </div>
 

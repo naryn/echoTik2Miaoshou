@@ -333,6 +333,8 @@ export interface RuntimePublicState {
   role: 'USER' | 'ADMIN' | null;
   /** 认证账号显示名 */
   display_name: string | null;
+  /** 被其他设备顶下线时的提示文案 */
+  auth_notice?: string | null;
   client_id: string | null;
   active_batch_id: string | null;
   runner_stage: RunnerCheckpoint['runner_stage'];
@@ -362,6 +364,8 @@ export const ERROR_CODES = {
   RANKING_SOURCE_VERIFICATION_REQUIRED: 'RANKING_SOURCE_VERIFICATION_REQUIRED',
   SERVER_UNREACHABLE: 'SERVER_UNREACHABLE',
   SERVER_UNAUTHORIZED: 'SERVER_UNAUTHORIZED',
+  /** 账号已在其他设备登录，本设备会话被顶替 */
+  SESSION_REPLACED: 'SESSION_REPLACED',
   SERVER_ERROR: 'SERVER_ERROR',
   NOT_REGISTERED: 'NOT_REGISTERED',
   TIKTOK_CHALLENGE: 'TIKTOK_CHALLENGE',

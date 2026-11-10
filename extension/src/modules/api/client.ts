@@ -16,6 +16,7 @@ import {
   BatchItemSchema,
   ClaimTaskResponseSchema,
   ClientMeSchema,
+  CollectedImageSchema,
   ProductItemSchema,
   RankHistoryResponseSchema,
   RankingPresetListSchema,
@@ -35,6 +36,7 @@ import {
   type BatchItem,
   type ClaimTaskResponse,
   type ClientMe,
+  type CollectedImage,
   type Paginated,
   type ProductItem,
   type RankHistoryResponse,
@@ -91,6 +93,8 @@ export interface ApiClientOptions {
   getAuth: () => Promise<{ client_id: string | null; client_token: string | null }>;
   /** 插件设置中填写的 auth token（Bearer 认证，所有请求携带） */
   getAuthToken?: () => Promise<string | null>;
+  /** 设备标识与设备会话（单设备登录校验，所有请求携带） */
+  getDeviceInfo?: () => Promise<{ device_id: string | null; session_id: string | null }>;
 }
 
 /** 默认超时与重试参数 */
@@ -136,6 +140,10 @@ export function createApiClient(opts: ApiClientOptions) {
         // 认证 Token（插件设置填写）：服务端优先按 Bearer 解析账号与角色
         const authToken = (await opts.getAuthToken?.()) ?? null;
         if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+        // 设备标识与设备会话：服务端据此校验“同一账号仅一台设备在线”
+        const device = (await opts.getDeviceInfo?.()) ?? null;
+        if (device?.device_id) headers['X-Device-Id'] = device.device_id;
+        if (device?.session_id) headers['X-Session-Id'] = device.session_id;
         const baseUrl = await opts.getBaseUrl();
         const resp = await fetch(`${baseUrl}${path}`, {
           method,
@@ -144,7 +152,16 @@ export function createApiClient(opts: ApiClientOptions) {
           signal: controller.signal,
         });
         if (resp.status === 401 || resp.status === 403) {
-          throw new ApiError(ERROR_CODES.SERVER_UNAUTHORIZED, `远程鉴权失败(${resp.status})`, false, resp.status);
+          // 保留服务端稳定错误码（如 SESSION_REPLACED），便于界面区分“被其他设备顶下线”
+          const body: unknown = await resp.json().catch(() => null);
+          const env = ApiEnvelopeSchema.safeParse(body);
+          const serverError = env.success ? env.data.error : null;
+          throw new ApiError(
+            serverError?.code ?? ERROR_CODES.SERVER_UNAUTHORIZED,
+            serverError?.message ?? `远程鉴权失败(${resp.status})`,
+            false,
+            resp.status,
+          );
         }
         if (resp.status >= 500) {
           throw new ApiError(ERROR_CODES.SERVER_ERROR, `远程服务错误(${resp.status})`, true, resp.status);
@@ -344,6 +361,22 @@ export function createApiClient(opts: ApiClientOptions) {
         RankHistoryResponseSchema,
       ) as Promise<RankHistoryResponse>;
     },
+    /** 上传图片字节到服务端 collected_images（同一客户端相同文件自动去重） */
+    collectImage(payload: {
+      source_url: string;
+      content_base64: string;
+      product_id?: string;
+      title?: string;
+      region?: string;
+      source_platform?: string;
+    }) {
+      return request(
+        'POST',
+        '/v1/collected-images',
+        payload,
+        CollectedImageSchema,
+      ) as Promise<CollectedImage>;
+    },
 
     // ---- 批次 ----
     /** 创建采集批次 */
@@ -418,9 +451,23 @@ export function createApiClient(opts: ApiClientOptions) {
     },
 
     // ---- 认证（插件填写 auth token）----
+    /** 设备登录：服务端绑定唯一在线设备，其他设备会话随即失效 */
+    authLogin(deviceId: string) {
+      return request(
+        'POST',
+        '/v1/auth/login',
+        { device_id: deviceId },
+        AuthMeSchema,
+        false,
+      ) as Promise<AuthMe>;
+    },
     /** 查询当前 auth token 对应的账号、角色与共享客户端 ID */
     authMe() {
       return request('GET', '/v1/auth/me', null, AuthMeSchema, false) as Promise<AuthMe>;
+    },
+    /** 退出当前设备会话 */
+    authLogout() {
+      return request('POST', '/v1/auth/logout', null, null, false) as Promise<{ logged_out: boolean }>;
     },
 
     /** 查询内置服务当前发布的插件版本与手动下载地址。 */

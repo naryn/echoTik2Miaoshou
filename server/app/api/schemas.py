@@ -7,6 +7,7 @@ from pydantic import AfterValidator, BaseModel, Field
 
 from app.config import ALLOWED_SOURCE_PLATFORMS, DEFAULT_SOURCE_PLATFORM
 from app.models import (
+    CollectedImage,
     CollectionAttempt,
     CollectionBatch,
     CollectionTask,
@@ -56,6 +57,12 @@ class HeartbeatRequest(BaseModel):
     active_batch_id: str | None = None
     active_task_id: str | None = None
     sync_pending_count: int = 0
+
+
+class AuthLoginRequest(BaseModel):
+    """设备登录请求：device_id 为浏览器扩展安装实例标识（单设备登录校验）。"""
+
+    device_id: str = Field(min_length=1, max_length=64)
 
 
 class SnapshotCreateRequest(BaseModel):
@@ -208,6 +215,17 @@ class ChargeableWeightRequest(BaseModel):
     actual_weight_kg: float = Field(gt=0)
 
 
+class CollectedImageCreateRequest(BaseModel):
+    """插件图片收集请求：图片字节以 base64 上传（不含 data URI 前缀）。"""
+
+    content_base64: str = Field(min_length=1)
+    source_url: str = Field(default="", max_length=4096)
+    product_id: str | None = Field(default=None, max_length=64)
+    title: str = Field(default="", max_length=512)
+    region: str = Field(default="", max_length=16)
+    source_platform: SourcePlatform = Field(default=DEFAULT_SOURCE_PLATFORM, max_length=16)
+
+
 # ---------- 序列化 ----------
 
 
@@ -356,4 +374,23 @@ def event_out(e: TaskEvent) -> dict:
         "payload_json": e.payload_json,
         "occurred_at": dt(e.occurred_at),
         "received_at": dt(e.received_at),
+    }
+
+
+def collected_image_out(image: CollectedImage, client_display_name: str = "") -> dict:
+    """序列化已收集图片元数据（storage_path 为服务端内部路径，不对外暴露）。"""
+    return {
+        "image_id": image.image_id,
+        "client_id": image.client_id,
+        "client_display_name": client_display_name,
+        "product_id": image.product_id,
+        "source_url": image.source_url,
+        "mime_type": image.mime_type,
+        "file_size": image.file_size,
+        "sha256": image.sha256,
+        "title": image.title,
+        "region": image.region,
+        "source_platform": image.source_platform,
+        "status": image.status,
+        "created_at": dt(image.created_at),
     }

@@ -46,11 +46,12 @@ def error_body(code: str, message: str, retryable: bool) -> dict:
 
 @dataclass
 class Identity:
-    """请求认证身份：客户端实体 + 可选认证账号 + 角色。"""
+    """请求认证身份：客户端实体 + 可选认证账号 + 角色 + 设备会话。"""
 
     client: CollectorClient
     user: AuthUser | None
     role: str
+    session_id: str | None = None
 
 
 def _bearer_token(request: Request) -> str | None:
@@ -63,21 +64,13 @@ def _bearer_token(request: Request) -> str | None:
     return request.headers.get("X-Auth-Token") or None
 
 
-def require_identity(
-    request: Request, db: Session = Depends(get_db)
-) -> Identity:
-    """解析请求认证身份。
+def bearer_token(request: Request) -> str | None:
+    """公开的 token 提取函数（登录/登出路由复用）。"""
+    return _bearer_token(request)
 
-    优先使用插件填写的 auth token（Bearer）；为兼容旧版本/自动化测试，
-    仍接受 X-Client-Id + X-Client-Token 头，此时角色视为普通用户。
-    """
-    token = _bearer_token(request)
-    if token:
-        user, client = auth_service.resolve_identity(db, token)
-        if client.status != "ACTIVE":
-            raise unauthorized(f"客户端状态为 {client.status}")
-        return Identity(client=client, user=user, role=(user.role or "USER").upper())
 
+def _legacy_client_identity(request: Request, db: Session) -> Identity:
+    """兼容旧版 X-Client-Id / X-Client-Token 头（角色视为普通用户）。"""
     client_id = request.headers.get("X-Client-Id")
     client_token = request.headers.get("X-Client-Token")
     if not client_id or not client_token:
@@ -92,11 +85,58 @@ def require_identity(
     return Identity(client=client, user=None, role="USER")
 
 
+def require_identity(
+    request: Request, db: Session = Depends(get_db)
+) -> Identity:
+    """解析请求认证身份。
+
+    优先使用插件填写的 auth token（Bearer）；为兼容旧版本/自动化测试，
+    仍接受 X-Client-Id + X-Client-Token 头，此时角色视为普通用户。
+    """
+    token = _bearer_token(request)
+    if token:
+        session_id = request.headers.get("X-Session-Id")
+        user, client = auth_service.resolve_identity(
+            db, token, request.headers.get("X-Device-Id"), session_id
+        )
+        if client.status != "ACTIVE":
+            raise unauthorized(f"客户端状态为 {client.status}")
+        return Identity(
+            client=client,
+            user=user,
+            role=(user.role or "USER").upper(),
+            session_id=session_id,
+        )
+    return _legacy_client_identity(request, db)
+
+
 def require_client(
     identity: Identity = Depends(require_identity),
 ) -> CollectorClient:
     """写接口鉴权：返回当前认证身份的客户端实体。"""
     return identity.client
+
+
+def require_identity_readonly(
+    request: Request, db: Session = Depends(get_db)
+) -> Identity:
+    """只读查看页鉴权：只校验 auth token，不占用/不校验设备会话。
+
+    仅用于服务端托管的图片预览页等只读场景，避免查看图片时挤掉插件登录。
+    """
+    token = _bearer_token(request)
+    if not token:
+        # 旧版客户端（X-Client-Id/Token）同样允许只读访问
+        return _legacy_client_identity(request, db)
+    user, client = auth_service.resolve_identity(db, token, enforce_session=False)
+    if client.status != "ACTIVE":
+        raise unauthorized(f"客户端状态为 {client.status}")
+    return Identity(
+        client=client,
+        user=user,
+        role=(user.role or "USER").upper(),
+        session_id=None,
+    )
 
 
 def require_admin(

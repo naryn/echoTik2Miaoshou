@@ -52,6 +52,8 @@ import {
 
 const EXT_VERSION = '0.1.2';
 const ALARM_TICK = 'echotik-tick';
+/** 图片收集单张上限（与服务端 MAX_IMAGE_BYTES 保持一致） */
+const MAX_IMAGE_UPLOAD_BYTES = 8 * 1024 * 1024;
 
 /** 按运行浏览器的本地日历获取昨日，日榜只请求已完整结算的日期。 */
 function yesterdayDate(): string {
@@ -70,6 +72,16 @@ function isVersionNewer(candidate: string, current: string): boolean {
     if ((c[index] ?? 0) !== (v[index] ?? 0)) return (c[index] ?? 0) > (v[index] ?? 0);
   }
   return false;
+}
+
+/** 把图片字节编码为 base64（分块避免超长参数导致栈溢出）。 */
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
 }
 
 /**
@@ -120,28 +132,52 @@ export default defineBackground(() => {
   // ---------------- 认证 Token ----------------
 
   /**
-   * 安装/更新处理：生成 install_id，并尝试用已填写的 auth token 绑定账号身份
-   * @param reason onInstalled 原因
+   * 确保本机安装标识存在
+   * 单设备登录以 install_id 作为设备标识，同一浏览器资料下保持稳定
    */
-  async function handleInstalled(reason: string): Promise<void> {
-    await storageSet('extension_version', EXT_VERSION);
+  async function ensureInstallId(): Promise<string> {
     let installId = await storageGet('install_id');
     if (!installId) {
       installId = crypto.randomUUID();
       await storageSet('install_id', installId);
     }
+    return installId;
+  }
+
+  /**
+   * 安装/更新处理：生成 install_id，并尝试用已填写的 auth token 绑定账号身份
+   * @param reason onInstalled 原因
+   */
+  async function handleInstalled(reason: string): Promise<void> {
+    await storageSet('extension_version', EXT_VERSION);
+    await ensureInstallId();
     await refreshAuthIdentity().catch(() => null);
     if (reason === 'install') {
       await browser.tabs.create({ url: 'https://echotik.live/' }).catch(() => undefined);
     }
   }
 
+  /** 是否“账号已在其他设备登录”错误 */
+  function isSessionReplaced(e: unknown): boolean {
+    return e instanceof ApiError && e.code === ERROR_CODES.SESSION_REPLACED;
+  }
+
   /**
-   * 用当前 auth token 请求 /v1/auth/me，并把账号共享的 client_id/角色写入本地
-   * @throws ApiError token 无效或网络失败时抛出
+   * 被其他设备顶下线：清除本机授权与会话并写入提示，停止所有远程操作
    */
-  async function fetchAuthIdentity(): Promise<AuthMe> {
-    const me = await getApi().authMe();
+  async function handleAuthKicked(): Promise<void> {
+    await storageSet('auth_token', null);
+    await storageSet('auth_session_id', null);
+    await storageSet(
+      'auth_notice',
+      '账号已在其他设备登录，本设备已退出登录；如需继续使用请重新激活。',
+    );
+    await clearClientBinding();
+    await broadcastState();
+  }
+
+  /** 把认证身份写入本地（账号共享 client_id、角色、显示名与设备会话） */
+  async function applyAuthMe(me: AuthMe): Promise<void> {
     await saveClientIdentity({
       client_id: me.client_id,
       client_token: null,
@@ -149,6 +185,27 @@ export default defineBackground(() => {
     });
     await storageSet('identity_role', me.role === 'ADMIN' ? 'ADMIN' : 'USER');
     await storageSet('identity_display_name', me.display_name ?? null);
+    if (me.session_id) await storageSet('auth_session_id', me.session_id);
+  }
+
+  /**
+   * 设备登录：绑定本机为账号唯一在线设备（其他设备会被顶下线）
+   * @throws ApiError token 无效或网络失败时抛出
+   */
+  async function loginAuthIdentity(): Promise<AuthMe> {
+    const deviceId = await ensureInstallId();
+    const me = await getApi().authLogin(deviceId);
+    await applyAuthMe(me);
+    return me;
+  }
+
+  /**
+   * 校验当前设备会话并刷新本地身份
+   * @throws ApiError token 无效/会话被顶替或网络失败时抛出
+   */
+  async function fetchAuthIdentity(): Promise<AuthMe> {
+    const me = await getApi().authMe();
+    await applyAuthMe(me);
     return me;
   }
 
@@ -162,9 +219,20 @@ export default defineBackground(() => {
       return null;
     }
     try {
-      return await fetchAuthIdentity();
-    } catch {
-      await clearClientBinding();
+      const me = await fetchAuthIdentity();
+      // 老版本升级/账号首次启用单设备登录：服务端还没有会话时补一次设备登录
+      if (!me.session_id) return await loginAuthIdentity();
+      return me;
+    } catch (e) {
+      if (isSessionReplaced(e)) {
+        await handleAuthKicked();
+        return null;
+      }
+      if (e instanceof ApiError && e.code === ERROR_CODES.SERVER_UNAUTHORIZED) {
+        await clearClientBinding();
+        return null;
+      }
+      // 网络异常：保留本地绑定，避免瞬时离线导致界面掉线
       return null;
     }
   }
@@ -195,6 +263,11 @@ export default defineBackground(() => {
       },
       // 插件设置填写的认证 Token：所有请求以 Bearer 发送
       getAuthToken: () => storageGet('auth_token'),
+      // 设备标识与设备会话：服务端校验同一账号仅一台设备在线
+      getDeviceInfo: async () => {
+        const s = await storageGetMany(['install_id', 'auth_session_id']);
+        return { device_id: s.install_id, session_id: s.auth_session_id };
+      },
     }));
   }
 
@@ -689,11 +762,9 @@ export default defineBackground(() => {
   async function handleTick(): Promise<void> {
     const authToken = await storageGet('auth_token');
     if (!authToken) return; // 未授权：不轮询、不执行任何远程操作
-    const identity = await loadClientIdentity();
-    if (!identity.client_id) {
-      await refreshAuthIdentity().catch(() => null);
-      if (!(await storageGet('client_id'))) return; // token 无效：等待设置页修正
-    }
+    // 每个周期校验设备会话：账号在其他设备登录后，本机立即停止远程操作
+    await refreshAuthIdentity().catch(() => null);
+    if (!(await storageGet('client_id'))) return; // 未授权/被顶下线：等待重新激活
     await syncOutbox();
     await reconcile('alarm');
     await getApi()
@@ -1238,26 +1309,37 @@ export default defineBackground(() => {
       'auth.me': wrapHandler<'auth.me'>(async () => {
         const token = await storageGet('auth_token');
         if (!token) throw new ApiError(ERROR_CODES.SERVER_UNAUTHORIZED, '请先完成激活认证');
-        return fetchAuthIdentity();
+        const me = await refreshAuthIdentity();
+        if (!me) throw new ApiError(ERROR_CODES.SERVER_UNAUTHORIZED, '认证会话无效，请重新激活');
+        return me;
       }),
       'auth.setToken': wrapHandler<'auth.setToken'>(async (payload) => {
         const token = (payload?.token ?? '').trim();
         if (!token) throw new Error('认证 Token 不能为空');
         await storageSet('auth_token', token);
         await clearClientBinding();
+        await storageSet('auth_session_id', null);
         try {
-          const me = await fetchAuthIdentity();
+          // 设备登录：本机成为账号唯一在线设备，其他设备随即被顶下线
+          const me = await loginAuthIdentity();
+          await storageSet('auth_notice', null);
           await broadcastState();
           return me;
         } catch (e) {
           // 无效 token 不保留，避免界面处于无法自证的授权态
           await storageSet('auth_token', null);
+          await storageSet('auth_session_id', null);
+          await clearClientBinding();
           await broadcastState();
           throw e;
         }
       }),
       'auth.clear': wrapHandler<'auth.clear'>(async () => {
+        // 先在服务端注销设备会话（失败不阻塞本地退出）
+        await getApi().authLogout().catch(() => undefined);
         await storageSet('auth_token', null);
+        await storageSet('auth_session_id', null);
+        await storageSet('auth_notice', null);
         await clearClientBinding();
         await broadcastState();
         return { ok: true as const };
@@ -1468,6 +1550,26 @@ export default defineBackground(() => {
       'product.collectSingle': wrapHandler<'product.collectSingle'>(async (payload) =>
         collectSingleProduct(payload.external_product_id, payload.region),
       ),
+      'product.collectImage': wrapHandler<'product.collectImage'>(async (payload) => {
+        const url = payload.source_url?.trim();
+        if (!url) throw new Error('缺少图片地址');
+        const resp = await fetch(url, { credentials: 'omit', cache: 'no-store' });
+        if (!resp.ok) throw new Error(`图片下载失败(${resp.status})`);
+        const blob = await resp.blob();
+        if (!blob.size) throw new Error('图片内容为空');
+        if (blob.size > MAX_IMAGE_UPLOAD_BYTES) {
+          throw new Error(`图片超过 ${MAX_IMAGE_UPLOAD_BYTES / (1024 * 1024)}MB，无法上传`);
+        }
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        return getApi().collectImage({
+          source_url: url,
+          content_base64: bytesToBase64(bytes),
+          product_id: payload.product_id,
+          title: payload.title,
+          region: payload.region,
+          source_platform: payload.source_platform,
+        });
+      }),
       'product.rankHistory': wrapHandler<'product.rankHistory'>(async (payload) =>
         getApi().productRankHistory(payload.product_id),
       ),
@@ -1762,6 +1864,7 @@ export default defineBackground(() => {
     const authToken = await storageGet('auth_token');
     const roleRaw = await storageGet('identity_role');
     const displayName = await storageGet('identity_display_name');
+    const authNotice = await storageGet('auth_notice');
     const authorized = !!authToken && !!identity.client_id;
     const role = authorized && roleRaw ? (roleRaw === 'ADMIN' ? 'ADMIN' : 'USER') : null;
     const cp = await loadCheckpoint();
@@ -1796,6 +1899,7 @@ export default defineBackground(() => {
       authorized,
       role,
       display_name: displayName ?? null,
+      auth_notice: authNotice ?? null,
       client_id: identity.client_id,
       active_batch_id: activeBatchId,
       runner_stage: runnerStage,

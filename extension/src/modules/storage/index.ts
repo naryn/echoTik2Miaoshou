@@ -50,6 +50,10 @@ export const STORAGE_DEFAULTS = {
   behavior_config: DEFAULT_BEHAVIOR_CONFIG as BehaviorConfig,
   /** 插件设置填写的认证 Token（Bearer；为空表示未授权，不能使用插件） */
   auth_token: null as string | null,
+  /** 服务端下发的设备会话凭证（单设备登录：其他设备登录后本机该会话失效） */
+  auth_session_id: null as string | null,
+  /** 被其他设备顶下线时展示的原因（重新激活成功后清空） */
+  auth_notice: null as string | null,
   /** 认证账号角色（由 /v1/auth/me 返回，USER/ADMIN） */
   identity_role: null as string | null,
   /** 认证账号显示名 */

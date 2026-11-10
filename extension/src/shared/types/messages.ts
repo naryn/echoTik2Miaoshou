@@ -21,6 +21,7 @@ import type {
   AuthMe,
   BatchItem,
   ClientMe,
+  CollectedImage,
   Paginated,
   ProductItem,
   RankHistoryResponse,
@@ -185,6 +186,17 @@ export interface MessageMap {
   'product.collectSingle': {
     req: { external_product_id: string; region: string };
     res: { batch_id: string; closed_batch_ids?: string[] };
+  };
+  /** 图片收集：background 拉取图片字节并上传到服务端 collected_images */
+  'product.collectImage': {
+    req: {
+      source_url: string;
+      product_id?: string;
+      title?: string;
+      region?: string;
+      source_platform?: string;
+    };
+    res: CollectedImage;
   };
   /** 批次列表（附聚合进度） */
   'batch.list': {

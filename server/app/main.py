@@ -11,7 +11,16 @@ from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import routes_admin, routes_auth, routes_batches, routes_clients, routes_pricing, routes_rank, routes_tasks
+from app.api import (
+    routes_admin,
+    routes_auth,
+    routes_batches,
+    routes_clients,
+    routes_images,
+    routes_pricing,
+    routes_rank,
+    routes_tasks,
+)
 from app.api.deps import error_body, ok, set_request_id
 from app.config import CORS_ALLOW_ORIGINS
 from app.db import init_db
@@ -89,6 +98,11 @@ def create_app() -> FastAPI:
         """由 FastAPI 托管的 MX POP 定价网页；计算结果来自后端 API。"""
         return FileResponse(static_dir / "pricing.html")
 
+    @app.get("/collected-images", include_in_schema=False)
+    def collected_images_page():
+        """图片收集预览页：输入 auth token 后查看已上传到服务端的图片。"""
+        return FileResponse(static_dir / "collected-images.html")
+
     @app.get("/v1/plugin-update")
     def plugin_update():
         """返回当前可手动安装的插件版本与下载地址。"""
@@ -106,6 +120,7 @@ def create_app() -> FastAPI:
     app.include_router(routes_batches.router)
     app.include_router(routes_tasks.router)
     app.include_router(routes_admin.router)
+    app.include_router(routes_images.router)
     app.include_router(routes_pricing.router)
     return app
 

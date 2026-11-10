@@ -155,6 +155,25 @@ export const ProductItemSchema = z.object({
 });
 export type ProductItem = z.infer<typeof ProductItemSchema>;
 
+/** 已收集图片元数据（服务端 collected_images） */
+export const CollectedImageSchema = z.object({
+  image_id: z.string(),
+  client_id: z.string(),
+  product_id: z.string().nullable().optional(),
+  source_url: z.string().nullable().optional(),
+  mime_type: z.string(),
+  file_size: z.number(),
+  sha256: z.string(),
+  title: z.string().nullable().optional(),
+  region: z.string().nullable().optional(),
+  source_platform: z.string().nullable().optional(),
+  status: z.string(),
+  created_at: z.string().nullable().optional(),
+  /** 同一客户端此前已上传过相同文件 */
+  deduped: z.boolean(),
+});
+export type CollectedImage = z.infer<typeof CollectedImageSchema>;
+
 /** 榜单明细项（服务端 rank_entry_out，可携带快照） */
 export const RankEntrySchema = z.object({
   id: z.string(),
@@ -273,7 +292,7 @@ export const ClientMeSchema = z.object({
 });
 export type ClientMe = z.infer<typeof ClientMeSchema>;
 
-/** 认证身份（服务端 /v1/auth/me） */
+/** 认证身份（服务端 /v1/auth/me 与 /v1/auth/login） */
 export const AuthMeSchema = z.object({
   client_id: z.string(),
   display_name: z.string().nullable().optional(),
@@ -281,6 +300,8 @@ export const AuthMeSchema = z.object({
   registered_at: z.string().nullable().optional(),
   extension_version: z.string().nullable().optional(),
   last_seen_at: z.string().nullable().optional(),
+  /** 设备会话凭证（单设备登录） */
+  session_id: z.string().nullable().optional(),
 });
 export type AuthMe = z.infer<typeof AuthMeSchema>;
 

@@ -17,6 +17,9 @@ export default defineConfig({
     host_permissions: [
       'https://echotik.live/*',
       'https://*.echotik.live/*',
+      'https://*.ttcdn-us.com/*',
+      'https://*.tiktokcdn.com/*',
+      'https://*.tiktokcdn-us.com/*',
       'https://www.tiktok.com/*',
       'https://shop.tiktok.com/*',
       'http://localhost:8000/*',

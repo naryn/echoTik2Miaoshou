@@ -73,6 +73,13 @@ class AuthUser(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 单设备登录：记录当前唯一在线设备与会话；session_started_at 一旦写入，
+    # 即强制该账号所有请求必须携带匹配的设备/会话，登出后也不回退到免会话模式。
+    active_device_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    active_session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    session_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class RankingPreset(Base):
@@ -262,6 +269,38 @@ class TaskEvent(Base):
     payload_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class CollectedImage(Base):
+    """插件手动收集的商品图片归档（客户端内按文件 SHA256 去重）。
+
+    - 字节落盘到 data/collected_images/<client_id>/<sha256>.<ext>，库内只存相对路径
+    - product_id 可空：图片允许脱离商品主数据单独收集
+    - title/region 为上传时的快照，避免商品后续被改名后丢失上下文
+    """
+
+    __tablename__ = "collected_images"
+    __table_args__ = (
+        UniqueConstraint("client_id", "sha256", name="uq_collected_image_client_sha"),
+        Index("ix_collected_images_product", "product_id"),
+        Index("ix_collected_images_created", "created_at"),
+    )
+
+    image_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: new_id("img"))
+    client_id: Mapped[str] = mapped_column(
+        ForeignKey("collector_clients.client_id"), nullable=False, index=True
+    )
+    product_id: Mapped[str | None] = mapped_column(ForeignKey("products.id"), nullable=True)
+    source_url: Mapped[str] = mapped_column(Text, default="")
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(64), default="")
+    file_size: Mapped[int] = mapped_column(Integer, default=0)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(Text, default="")
+    region: Mapped[str] = mapped_column(String(16), default="")
+    source_platform: Mapped[str] = mapped_column(String(16), default="ECHOTIK")
+    status: Mapped[str] = mapped_column(String(16), default="ACTIVE")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ClientHeartbeat(Base):

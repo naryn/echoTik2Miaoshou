@@ -21,5 +21,11 @@ MAX_ENTRIES_BATCH = 200
 # 客户端凭证长度（token_urlsafe 字节数）
 CLIENT_TOKEN_BYTES = 32
 
+# 插件图片收集：单张上限与落盘目录（数据库只存相对路径）
+MAX_IMAGE_BYTES = int(os.environ.get("MAX_IMAGE_BYTES", str(8 * 1024 * 1024)))
+COLLECTED_IMAGES_DIR = os.environ.get(
+    "COLLECTED_IMAGES_DIR", os.path.join(BASE_DIR, "data", "collected_images")
+)
+
 # CORS 允许的扩展来源（Chrome 扩展 origin 为 chrome-extension://<id>，MVP 全放开）
 CORS_ALLOW_ORIGINS = os.environ.get("CORS_ALLOW_ORIGINS", "*")

@@ -154,6 +154,16 @@ table.list tr:hover td { background: #f9fafb; }
 .image-preview-trigger { display: block; padding: 0; border: 0; border-radius: 4px; background: none; cursor: zoom-in; }
 .image-preview-trigger:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 .thumb { width: 32px; height: 32px; border-radius: 4px; object-fit: cover; background: #f3f4f6; display: block; }
+.thumb-cell { position: relative; display: inline-block; width: 32px; height: 32px; }
+/* 图片左上角的上传小图标：点击只上传，不触发放大预览 */
+.image-collect-btn {
+  position: absolute; top: -6px; left: -6px; width: 16px; height: 16px;
+  display: flex; align-items: center; justify-content: center; padding: 0;
+  border: 1px solid #d1d5db; border-radius: 999px; background: #fff; color: #2563eb;
+  cursor: pointer; box-shadow: 0 1px 2px rgba(0, 0, 0, .15); z-index: 1;
+}
+.image-collect-btn:hover { background: #eff6ff; border-color: #2563eb; }
+.image-collect-btn:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ---- 商品大图预览 ---- */
 .image-preview-mask {
@@ -169,6 +179,15 @@ table.list tr:hover td { background: #f9fafb; }
   position: absolute; top: -12px; right: -12px; width: 30px; height: 30px; border: 0; border-radius: 999px;
   background: #fff; color: #111827; font-size: 22px; line-height: 28px; cursor: pointer; box-shadow: 0 1px 5px rgba(0,0,0,.25);
 }
+/* 大图左上角的上传按钮：与列表缩略图一致，上传的是同一张原图 */
+.image-preview-collect {
+  position: absolute; top: -12px; left: -12px; width: 30px; height: 30px;
+  display: flex; align-items: center; justify-content: center; padding: 0;
+  border: 0; border-radius: 999px; background: #fff; color: #2563eb;
+  cursor: pointer; box-shadow: 0 1px 5px rgba(0,0,0,.25);
+}
+.image-preview-collect:hover { background: #eff6ff; color: #1d4ed8; }
+.image-preview-collect:disabled { opacity: .5; cursor: not-allowed; }
 /* ---- 状态徽标 ---- */
 .badge {
   display: inline-block; padding: 1px 6px; border-radius: 999px;

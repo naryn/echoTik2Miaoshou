@@ -141,6 +141,12 @@ export function classifyError(e: unknown): { kind: string; text: string } {
   if (msg.includes('BATCH_ALREADY_ACTIVE')) {
     return { kind: 'batch-active', text: '已有进行中的批次，请先在「批次任务」完成或停止它后再创建新批次。' };
   }
+  if (msg.includes('SESSION_REPLACED')) {
+    return {
+      kind: 'session-replaced',
+      text: '账号已在其他设备登录，本设备已退出登录；如需继续使用请重新激活。',
+    };
+  }
   if (msg.includes('SERVER_UNAUTHORIZED') || msg.includes('NOT_REGISTERED')) {
     return { kind: 'server-auth', text: '客户端未注册或凭证失效，请到设置页重新绑定。' };
   }

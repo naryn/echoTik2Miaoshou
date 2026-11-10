@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>图片收集预览 - EchoTik Collector</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card: #fff;
+    --text: #111827;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --accent: #2563eb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 24px 20px 48px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  .sub { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; }
+  input[type="password"], input[type="text"] {
+    width: 260px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: #fff; font: inherit; outline: none;
+  }
+  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37, 99, 235, .12); }
+  button {
+    padding: 8px 14px; border: 1px solid var(--line); border-radius: 8px; background: #fff;
+    font: inherit; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { background: #1d4ed8; color: #fff; }
+  .message { min-height: 22px; color: var(--muted); margin-bottom: 12px; }
+  .message.error { color: #b91c1c; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .card-image {
+    position: relative; aspect-ratio: 1 / 1; background: #f3f4f6;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .card-image img { width: 100%; height: 100%; object-fit: contain; cursor: zoom-in; display: block; }
+  .card-image img[hidden] { display: none; }
+  .card-image .placeholder { position: absolute; color: var(--muted); font-size: 12px; }
+  .card-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 6px; }
+  .card-title {
+    font-weight: 500; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical; overflow: hidden; word-break: break-all;
+  }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px; color: var(--muted); font-size: 12px; }
+  .tag { padding: 1px 6px; border-radius: 999px; background: #f3f4f6; color: #4b5563; }
+  .card-foot { margin-top: 2px; color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; }
+  .card-foot a { color: var(--accent); text-decoration: none; }
+  .card-foot a:hover { text-decoration: underline; }
+  .empty { padding: 64px 0; text-align: center; color: var(--muted); }
+  .pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 24px; }
+  .pager .info { color: var(--muted); font-size: 13px; }
+  .lightbox {
+    position: fixed; inset: 0; background: rgba(17, 24, 39, .78); display: flex;
+    align-items: center; justify-content: center; padding: 32px; cursor: zoom-out; z-index: 50;
+  }
+  .lightbox[hidden] { display: none; }
+  .lightbox img { max-width: 92vw; max-height: 90vh; border-radius: 8px; background: #fff; }
+  @media (max-width: 560px) {
+    input[type="password"], input[type="text"] { width: 100%; }
+    .toolbar { width: 100%; }
+    .toolbar input { flex: 1; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>图片收集预览</h1>
+      <p class="sub">插件上传到服务端的商品图片，按收集时间倒序展示。</p>
+    </div>
+    <div class="toolbar">
+      <input id="token" type="password" placeholder="填写 auth token" autocomplete="off" />
+      <button id="refresh" class="primary" type="button">刷新</button>
+    </div>
+  </header>
+
+  <div id="message" class="message"></div>
+  <div id="grid" class="grid"></div>
+  <div id="empty" class="empty" hidden>暂无收集的图片</div>
+
+  <div class="pager">
+    <button id="prev" type="button">上一页</button>
+    <span id="pageInfo" class="info"></span>
+    <button id="next" type="button">下一页</button>
+  </div>
+</div>
+
+<div id="lightbox" class="lightbox" hidden><img id="lightboxImg" alt="图片大图" /></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var TOKEN_KEY = 'echotik_view_token';
+  var PER_PAGE = 20;
+  var grid = document.getElementById('grid');
+  var message = document.getElementById('message');
+  var empty = document.getElementById('empty');
+  var pageInfo = document.getElementById('pageInfo');
+  var tokenInput = document.getElementById('token');
+  var prevBtn = document.getElementById('prev');
+  var nextBtn = document.getElementById('next');
+  var lightbox = document.getElementById('lightbox');
+  var lightboxImg = document.getElementById('lightboxImg');
+
+  var state = { page: 1, total: 0, loading: false, token: localStorage.getItem(TOKEN_KEY) || '' };
+  var objectUrls = [];
+  tokenInput.value = state.token;
+
+  function authHeaders() {
+    return state.token ? { Authorization: 'Bearer ' + state.token } : {};
+  }
+
+  async function fetchJson(path) {
+    var res = await fetch(path, { headers: authHeaders() });
+    var body = await res.json().catch(function () { return null; });
+    if (!res.ok) {
+      var err = new Error((body && body.error && body.error.message) || '请求失败（' + res.status + '）');
+      err.status = res.status;
+      throw err;
+    }
+    return body.data;
+  }
+
+  function setMessage(text, isError) {
+    message.textContent = text || '';
+    message.className = 'message' + (isError ? ' error' : '');
+  }
+
+  function formatSize(bytes) {
+    if (!bytes && bytes !== 0) return '-';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+
+  function formatTime(value) {
+    if (!value) return '-';
+    var d = new Date(value);
+    return isNaN(d.getTime()) ? value : d.toLocaleString('zh-CN', { hour12: false });
+  }
+
+  function clearObjectUrls() {
+    objectUrls.forEach(function (url) { URL.revokeObjectURL(url); });
+    objectUrls = [];
+  }
+
+  async function loadImage(imageId, img, placeholder) {
+    try {
+      var res = await fetch('/v1/collected-images/' + encodeURIComponent(imageId) + '/file', {
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      var url = URL.createObjectURL(await res.blob());
+      objectUrls.push(url);
+      img.src = url;
+      img.hidden = false;
+      placeholder.hidden = true;
+    } catch (e) {
+      placeholder.textContent = '图片加载失败';
+    }
+  }
+
+  function buildCard(item) {
+    var card = document.createElement('article');
+    card.className = 'card';
+
+    var imageBox = document.createElement('div');
+    imageBox.className = 'card-image';
+    var img = document.createElement('img');
+    img.alt = item.title || '商品图片';
+    img.loading = 'lazy';
+    img.hidden = true;
+    var placeholder = document.createElement('span');
+    placeholder.className = 'placeholder';
+    placeholder.textContent = '图片加载中…';
+    img.addEventListener('click', function () {
+      lightboxImg.src = img.src;
+      lightbox.hidden = false;
+    });
+    imageBox.appendChild(img);
+    imageBox.appendChild(placeholder);
+
+    var body = document.createElement('div');
+    body.className = 'card-body';
+
+    var title = document.createElement('div');
+    title.className = 'card-title';
+    title.textContent = item.title || '未命名商品';
+
+    var meta = document.createElement('div');
+    meta.className = 'meta';
+    [
+      item.region || '未知站点',
+      item.source_platform || '未知来源',
+      formatSize(item.file_size),
+    ].forEach(function (text) {
+      var tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = text;
+      meta.appendChild(tag);
+    });
+
+    var foot = document.createElement('div');
+    foot.className = 'card-foot';
+    var uploader = document.createElement('span');
+    uploader.textContent = item.client_display_name || item.client_id || '';
+    foot.appendChild(uploader);
+    var time = document.createElement('span');
+    time.textContent = formatTime(item.created_at);
+    foot.appendChild(time);
+
+    if (item.source_url && /^https?:\/\//i.test(item.source_url)) {
+      var link = document.createElement('a');
+      link.href = item.source_url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = '原图地址';
+      body.appendChild(title);
+      body.appendChild(meta);
+      body.appendChild(foot);
+      body.appendChild(link);
+    } else {
+      body.appendChild(title);
+      body.appendChild(meta);
+      body.appendChild(foot);
+    }
+
+    card.appendChild(imageBox);
+    card.appendChild(body);
+    grid.appendChild(card);
+    loadImage(item.image_id, img, placeholder);
+  }
+
+  function renderPager() {
+    var pages = Math.max(1, Math.ceil(state.total / PER_PAGE));
+    pageInfo.textContent = '第 ' + state.page + ' / ' + pages + ' 页 · 共 ' + state.total + ' 张';
+    prevBtn.disabled = state.page <= 1;
+    nextBtn.disabled = state.page >= pages;
+  }
+
+  async function load() {
+    if (state.loading) return;
+    state.loading = true;
+    setMessage('加载中…');
+    clearObjectUrls();
+    grid.textContent = '';
+    empty.hidden = true;
+    try {
+      var data = await fetchJson('/v1/collected-images?page=' + state.page + '&per_page=' + PER_PAGE);
+      state.total = data.total || 0;
+      data.items.forEach(buildCard);
+      empty.hidden = data.items.length > 0;
+      renderPager();
+      setMessage('');
+    } catch (e) {
+      renderPager();
+      setMessage(e.status === 401 ? '未认证：请在右上角填写有效的 auth token 后刷新。' : e.message, true);
+      empty.hidden = true;
+    } finally {
+      state.loading = false;
+    }
+  }
+
+  document.getElementById('refresh').addEventListener('click', function () {
+    state.token = tokenInput.value.trim();
+    localStorage.setItem(TOKEN_KEY, state.token);
+    if (state.page !== 1) {
+      state.page = 1;
+    }
+    load();
+  });
+
+  tokenInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') document.getElementById('refresh').click();
+  });
+
+  prevBtn.addEventListener('click', function () {
+    if (state.page > 1) { state.page -= 1; load(); }
+  });
+
+  nextBtn.addEventListener('click', function () {
+    state.page += 1;
+    load();
+  });
+
+  lightbox.addEventListener('click', function () {
+    lightbox.hidden = true;
+    lightboxImg.removeAttribute('src');
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !lightbox.hidden) {
+      lightbox.hidden = true;
+      lightboxImg.removeAttribute('src');
+    }
+  });
+
+  load();
+})();
+</script>
+</body>
+</html>

@@ -24,6 +24,11 @@ def unauthorized(message: str = "客户端凭证缺失或无效") -> ApiError:
     return ApiError("UNAUTHORIZED", message, http_status=401, retryable=False)
 
 
+def session_replaced(message: str = "账号已在其他设备登录，本设备已退出登录") -> ApiError:
+    """构造单设备登录冲突错误：当前设备会话已被其他设备顶替。"""
+    return ApiError("SESSION_REPLACED", message, http_status=401, retryable=False)
+
+
 def forbidden(message: str = "资源不属于当前客户端") -> ApiError:
     """构造 403 越权访问错误。"""
     return ApiError("FORBIDDEN_OWNERSHIP", message, http_status=403, retryable=False)

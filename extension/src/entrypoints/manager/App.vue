@@ -132,7 +132,10 @@ async function doCancel(): Promise<void> {
       <!-- 未授权：插件不可用，必须先完成激活认证 -->
       <div v-if="store.state && !authorized" class="card" style="margin-top: 12px">
         <h3>激活认证</h3>
-        <p class="small muted">请输入激活认证码后开始使用。</p>
+        <p v-if="store.state.auth_notice" class="alert-bar err" style="margin-top: 0">
+          {{ store.state.auth_notice }}
+        </p>
+        <p class="small muted">同一账号仅允许一台设备在线，请输入激活认证码后开始使用。</p>
         <div class="form-row">
           <label>激活认证</label>
           <input v-model="authInput" type="password" placeholder="输入激活认证码" @keyup.enter="activate" />
