@@ -1,6 +1,6 @@
 {
   "name": "echotik-miaoshou-collector",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "private": true,
   "description": "EchoTik → TikTok → 妙手 ERP 采集 Chrome MV3 扩展",
   "type": "module",

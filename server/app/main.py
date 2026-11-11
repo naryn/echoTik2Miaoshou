@@ -108,8 +108,8 @@ def create_app() -> FastAPI:
         """返回当前可手动安装的插件版本与下载地址。"""
         return ok(
             {
-                "version": "0.1.2",
-                "download_url": "http://39.102.73.231:8010/plugin-download/echotik-miaoshou-collector-0.1.2-chrome.zip",
+                "version": "0.1.4",
+                "download_url": "http://39.102.73.231:8010/plugin-download/echotik-miaoshou-collector-0.1.4-chrome.zip",
                 "notes": "",
             }
         )
