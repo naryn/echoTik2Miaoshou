@@ -6,6 +6,8 @@
  */
 import { computed, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
+import { browser } from 'wxt/browser';
+import { sendMsg } from '@/shared/messaging';
 import { locateWorkerTab, pauseRunner, refreshState, resumeRunner, setAuthToken, store } from './store';
 import { storageGet } from '@/modules/storage';
 
@@ -23,8 +25,46 @@ const authInput = ref('');
 const authBusy = ref(false);
 const authError = ref<string | null>(null);
 
+/** 强制更新信息：非空时锁定整个管理台，只能更新后才可继续使用 */
+const updateRequired = computed(() => store.state?.update_required ?? null);
+/** 当前插件版本 */
+const currentVersion = browser.runtime.getManifest().version;
+/** 版本检测进行中 */
+const updateBusy = ref(false);
+/** 版本检测错误 */
+const updateError = ref<string | null>(null);
+
+/**
+ * 打开更新包下载地址
+ */
+async function openUpdateDownload(): Promise<void> {
+  const url = updateRequired.value?.download_url;
+  if (!url) return;
+  await browser.tabs.create({ url }).catch(() => undefined);
+}
+
+/**
+ * 重新检测版本：更新安装完成后点击，确认不再需要更新即解除锁定
+ */
+async function recheckUpdate(): Promise<void> {
+  updateBusy.value = true;
+  updateError.value = null;
+  try {
+    await sendMsg('plugin.checkUpdate', undefined);
+    await refreshState();
+  } catch (e) {
+    updateError.value = (e as Error).message;
+  } finally {
+    updateBusy.value = false;
+  }
+}
+
 onMounted(async () => {
   authInput.value = (await storageGet('auth_token')) ?? '';
+  // 打开管理台即校验一次版本，避免等待 10 分钟自动检查
+  void sendMsg('plugin.checkUpdate', undefined)
+    .then(() => refreshState())
+    .catch(() => undefined);
 });
 
 /**
@@ -100,6 +140,26 @@ async function doCancel(): Promise<void> {
 
 <template>
   <div class="app-shell">
+    <!-- 强制更新：版本落后时锁定整个管理台，更新完成前不可继续使用 -->
+    <div v-if="updateRequired" class="force-update-mask">
+      <div class="force-update-card">
+        <h2>插件必须更新</h2>
+        <p class="force-update-text">
+          当前版本 v{{ currentVersion }} 已停用，请更新到 v{{ updateRequired.version }} 后继续使用。
+        </p>
+        <p v-if="updateRequired.notes" class="small muted">{{ updateRequired.notes }}</p>
+        <div class="btn-row">
+          <button class="primary" @click="openUpdateDownload">下载更新包</button>
+          <button class="act" :disabled="updateBusy" @click="recheckUpdate">
+            {{ updateBusy ? '检测中…' : '我已更新，重新检测' }}
+          </button>
+        </div>
+        <p v-if="updateError" class="alert-bar err" style="margin-bottom: 0">{{ updateError }}</p>
+        <p class="small muted force-update-tip">
+          更新方式：下载压缩包并解压 → 打开 chrome://extensions → 覆盖原目录后点击扩展卡片上的「重新加载」。
+        </p>
+      </div>
+    </div>
     <header class="app-header">
       <h1>TK 采集助手</h1>
       <span class="client-id">客户端 {{ shortClientId }}</span>

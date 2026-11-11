@@ -6,6 +6,7 @@
  * - 超时 + 有限重试（仅网络错误等 retryable 情况）
  */
 import type { z } from 'zod';
+import { browser } from 'wxt/browser';
 import {
   ActiveTaskResponseSchema,
   AdminClientListSchema,
@@ -132,6 +133,8 @@ export function createApiClient(opts: ApiClientOptions) {
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        // 服务端据此强制更新：低于最低支持版本的请求会被 426 拒绝
+        headers['X-Client-Version'] = browser.runtime.getManifest().version;
         if (auth) {
           const { client_id, client_token } = await opts.getAuth();
           if (client_id) headers['X-Client-Id'] = client_id;

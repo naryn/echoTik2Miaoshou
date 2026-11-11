@@ -125,7 +125,10 @@
   tokenInput.value = state.token;
 
   function authHeaders() {
-    return state.token ? { Authorization: 'Bearer ' + state.token } : {};
+    // X-Client-Version: web 表示浏览器网页访问，跳过插件版本强制校验
+    var headers = { 'X-Client-Version': 'web' };
+    if (state.token) headers.Authorization = 'Bearer ' + state.token;
+    return headers;
   }
 
   async function fetchJson(path) {

@@ -26,8 +26,11 @@ def clean_db():
 
 @pytest.fixture()
 def client():
-    """提供 TestClient（触发应用 startup）。"""
-    with TestClient(app) as c:
+    """提供 TestClient（触发应用 startup）。
+
+    统一带上插件版本头，避免被强制更新中间件拦截；版本相关用例单独覆盖。
+    """
+    with TestClient(app, headers={"X-Client-Version": "0.1.5"}) as c:
         yield c
 
 

@@ -22,9 +22,52 @@ from app.api import (
     routes_tasks,
 )
 from app.api.deps import error_body, ok, set_request_id
-from app.config import CORS_ALLOW_ORIGINS
+from app.config import (
+    CORS_ALLOW_ORIGINS,
+    MIN_CLIENT_VERSION,
+    PLUGIN_DOWNLOAD_URL,
+    PLUGIN_VERSION,
+)
 from app.db import init_db
 from app.services.errors import ApiError
+
+# 客户端版本头：扩展每次请求都会带上自身版本号
+CLIENT_VERSION_HEADER = "X-Client-Version"
+# 浏览器网页（图片预览页等）使用的固定标识，不做版本校验
+WEB_CLIENT_VERSION = "web"
+# 无需版本校验的公开路径前缀（更新接口、下载、静态页、文档、网页专用 API）
+VERSION_EXEMPT_PREFIXES = (
+    "/healthz",
+    "/v1/plugin-update",
+    "/plugin-download",
+    "/pricing",
+    "/pricing-assets",
+    "/v1/pricing",
+    "/collected-images",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+)
+
+
+def is_client_version_ok(raw: str) -> bool:
+    """判断客户端上报版本是否达到最低支持版本（缺失或非法版本一律视为过旧）。"""
+    value = (raw or "").strip().lower()
+    if value == WEB_CLIENT_VERSION:
+        return True
+
+    def parse(text: str) -> list[int]:
+        """把 x.y.z 解析为数字列表，非数字段按 0 处理。"""
+        return [int(item) if item.isdigit() else 0 for item in text.lstrip("v").split(".")]
+
+    current = parse(value)
+    minimum = parse(MIN_CLIENT_VERSION)
+    for index in range(max(len(current), len(minimum))):
+        mine = current[index] if index < len(current) else 0
+        need = minimum[index] if index < len(minimum) else 0
+        if mine != need:
+            return mine > need
+    return True
 
 
 @asynccontextmanager
@@ -57,6 +100,24 @@ def create_app() -> FastAPI:
         if path.startswith("//"):
             request.scope["path"] = "/" + path.lstrip("/")
         return await call_next(request)
+
+    @app.middleware("http")
+    async def enforce_client_version(request: Request, call_next):
+        """强制更新：低于最低支持版本的插件请求直接返回 426，必须升级后才能继续使用。"""
+        path = request.url.path
+        if request.method == "OPTIONS" or path.startswith(VERSION_EXEMPT_PREFIXES):
+            return await call_next(request)
+        raw = request.headers.get(CLIENT_VERSION_HEADER, "")
+        if is_client_version_ok(raw):
+            return await call_next(request)
+        return JSONResponse(
+            status_code=426,
+            content=error_body(
+                "PLUGIN_UPDATE_REQUIRED",
+                f"插件版本过低（当前 v{raw or '未知'}），请更新到 v{MIN_CLIENT_VERSION}：{PLUGIN_DOWNLOAD_URL}",
+                False,
+            ),
+        )
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
@@ -108,8 +169,8 @@ def create_app() -> FastAPI:
         """返回当前可手动安装的插件版本与下载地址。"""
         return ok(
             {
-                "version": "0.1.2",
-                "download_url": "http://39.102.73.231:8010/plugin-download/echotik-miaoshou-collector-0.1.2-chrome.zip",
+                "version": PLUGIN_VERSION,
+                "download_url": PLUGIN_DOWNLOAD_URL,
                 "notes": "",
             }
         )

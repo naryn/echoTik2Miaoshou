@@ -343,6 +343,8 @@ export interface RuntimePublicState {
   progress: { done: number; total: number } | null;
   current_product_title?: string | null;
   last_error?: string | null;
+  /** 必须更新到的版本信息（非空表示当前插件版本过低，需强制更新） */
+  update_required?: { version: string; download_url: string; notes: string } | null;
 }
 
 /** 统一错误码（扩展内部使用） */
@@ -366,6 +368,8 @@ export const ERROR_CODES = {
   SERVER_UNAUTHORIZED: 'SERVER_UNAUTHORIZED',
   /** 账号已在其他设备登录，本设备会话被顶替 */
   SESSION_REPLACED: 'SESSION_REPLACED',
+  /** 插件版本过低，必须先更新到服务端要求的最新版本 */
+  PLUGIN_UPDATE_REQUIRED: 'PLUGIN_UPDATE_REQUIRED',
   SERVER_ERROR: 'SERVER_ERROR',
   NOT_REGISTERED: 'NOT_REGISTERED',
   TIKTOK_CHALLENGE: 'TIKTOK_CHALLENGE',

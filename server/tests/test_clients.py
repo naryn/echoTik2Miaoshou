@@ -1,6 +1,32 @@
 """客户端注册/心跳/身份相关测试。"""
 
+from fastapi.testclient import TestClient
+
+from app.main import app
 from tests.conftest import register_client
+
+
+def test_old_plugin_version_rejected():
+    """插件版本低于最低要求时，业务接口返回 426 PLUGIN_UPDATE_REQUIRED。"""
+    with TestClient(app, headers={"X-Client-Version": "0.1.4"}) as old_client:
+        resp = old_client.post("/v1/clients/register", json={"install_id": "old-install"})
+    assert resp.status_code == 426
+    assert resp.json()["error"]["code"] == "PLUGIN_UPDATE_REQUIRED"
+
+
+def test_missing_version_rejected():
+    """未上报版本头的旧版本插件同样视为过旧。"""
+    with TestClient(app) as legacy_client:
+        resp = legacy_client.post("/v1/clients/register", json={"install_id": "legacy-install"})
+    assert resp.status_code == 426
+
+
+def test_update_endpoint_exempt_from_version_gate():
+    """更新接口不校验版本，保证旧版本仍能检测并下载新包。"""
+    with TestClient(app) as legacy_client:
+        resp = legacy_client.get("/v1/plugin-update")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["version"]
 
 
 def test_register_idempotent(client):

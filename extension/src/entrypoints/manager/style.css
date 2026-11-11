@@ -262,3 +262,26 @@ table.list tr:hover td { background: #f9fafb; }
   .preset-name-input { min-width: 160px; }
   .snapshot-batch-toolbar { align-items: flex-start; flex-direction: column; }
 }
+
+/* 强制更新遮罩：覆盖整个管理台，更新完成前阻断所有操作 */
+.force-update-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.72);
+  backdrop-filter: blur(2px);
+}
+.force-update-card {
+  width: min(520px, 100%);
+  padding: 22px 24px;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.35);
+}
+.force-update-card h2 { margin: 0 0 8px; font-size: 18px; }
+.force-update-text { margin: 0 0 10px; font-size: 13px; line-height: 1.6; }
+.force-update-tip { margin: 10px 0 0; line-height: 1.6; }

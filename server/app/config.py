@@ -29,3 +29,13 @@ COLLECTED_IMAGES_DIR = os.environ.get(
 
 # CORS 允许的扩展来源（Chrome 扩展 origin 为 chrome-extension://<id>，MVP 全放开）
 CORS_ALLOW_ORIGINS = os.environ.get("CORS_ALLOW_ORIGINS", "*")
+
+# 当前发布的插件版本与下载地址（/v1/plugin-update 与强制更新提示共用）
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION", "0.1.5")
+PLUGIN_DOWNLOAD_URL = os.environ.get(
+    "PLUGIN_DOWNLOAD_URL",
+    f"http://39.102.73.231:8010/plugin-download/echotik-miaoshou-collector-{PLUGIN_VERSION}-chrome.zip",
+)
+
+# 接口最低可用的插件版本：低于该版本的请求一律返回 426 PLUGIN_UPDATE_REQUIRED
+MIN_CLIENT_VERSION = os.environ.get("MIN_CLIENT_VERSION", "0.1.5")

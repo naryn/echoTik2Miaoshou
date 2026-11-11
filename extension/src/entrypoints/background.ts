@@ -50,8 +50,10 @@ import {
   type TaskStatus,
 } from '@/shared/types';
 
-const EXT_VERSION = '0.1.2';
+const EXT_VERSION = '0.1.5';
 const ALARM_TICK = 'echotik-tick';
+/** 强制更新检查间隔（自动检查，用户手动检测不受此限制） */
+const UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 /** 图片收集单张上限（与服务端 MAX_IMAGE_BYTES 保持一致） */
 const MAX_IMAGE_UPLOAD_BYTES = 8 * 1024 * 1024;
 
@@ -128,6 +130,8 @@ export default defineBackground(() => {
 
   // 周期 alarm：reconcile + outbox 同步（周期 1 分钟，≥ 0.5 分钟约束）
   void browser.alarms.create(ALARM_TICK, { periodInMinutes: 1 });
+  // 启动即校验一次版本，保证旧版本一打开就被拦在使用入口之外
+  void checkForceUpdate(true);
 
   // ---------------- 认证 Token ----------------
 
@@ -160,6 +164,52 @@ export default defineBackground(() => {
   /** 是否“账号已在其他设备登录”错误 */
   function isSessionReplaced(e: unknown): boolean {
     return e instanceof ApiError && e.code === ERROR_CODES.SESSION_REPLACED;
+  }
+
+  /**
+   * 检查服务端最新插件版本；本地落后时写入强制更新提示并广播
+   * @param force 是否忽略检查间隔立即请求（启动、手动检测时使用）
+   * @returns 服务端版本信息（含 update_available）；请求失败返回 null
+   */
+  async function checkForceUpdate(
+    force = false,
+  ): Promise<{
+    version: string;
+    download_url: string;
+    notes: string;
+    update_available: boolean;
+  } | null> {
+    if (!force) {
+      const last = await storageGet('update_checked_at');
+      if (last && Date.now() - last < UPDATE_CHECK_INTERVAL_MS) return null;
+    }
+    const update = await getApi()
+      .pluginUpdate()
+      .catch(() => null);
+    // 网络异常时保留上次结论，避免误放行（旧版本继续使用）或误拦截（服务端抖动）
+    if (!update) return null;
+    await storageSet('update_checked_at', Date.now());
+    const outOfDate = isVersionNewer(update.version, EXT_VERSION);
+    await storageSet(
+      'update_notice',
+      outOfDate
+        ? { version: update.version, download_url: update.download_url, notes: update.notes }
+        : null,
+    );
+    if (outOfDate) await broadcastState();
+    return { ...update, update_available: outOfDate };
+  }
+
+  /**
+   * 强制更新门禁：本地版本落后时拒绝执行采集/上传等写操作
+   */
+  async function assertUpToDate(): Promise<void> {
+    const notice = await storageGet('update_notice');
+    if (!notice) return;
+    throw new ApiError(
+      ERROR_CODES.PLUGIN_UPDATE_REQUIRED,
+      `插件版本过低（当前 v${EXT_VERSION}），请先更新到 v${notice.version}`,
+    );
   }
 
   /**
@@ -764,6 +814,8 @@ export default defineBackground(() => {
     if (!authToken) return; // 未授权：不轮询、不执行任何远程操作
     // 每个周期校验设备会话：账号在其他设备登录后，本机立即停止远程操作
     await refreshAuthIdentity().catch(() => null);
+    // 自动检查插件版本（10 分钟一次），落后时写入强制更新提示
+    await checkForceUpdate();
     if (!(await storageGet('client_id'))) return; // 未授权/被顶下线：等待重新激活
     await syncOutbox();
     await reconcile('alarm');
@@ -1356,10 +1408,13 @@ export default defineBackground(() => {
         return { saved: true as const };
       }),
       'plugin.checkUpdate': wrapHandler<'plugin.checkUpdate'>(async () => {
-        const update = await getApi().pluginUpdate();
-        return { ...update, update_available: isVersionNewer(update.version, EXT_VERSION) };
+        // 手动检测必须立即请求，并把结论落盘供门禁与界面共用
+        const update = await checkForceUpdate(true);
+        if (!update) throw new ApiError(ERROR_CODES.SERVER_UNREACHABLE, '无法连接服务端检测更新');
+        return update;
       }),
       'runner.start': wrapHandler<'runner.start'>(async (payload) => {
+        await assertUpToDate();
         await getApi().batchAction(payload.batchId, 'start', { client_id: await storageGet('client_id') });
         await saveCheckpoint({ ...(await loadCheckpoint()), active_batch_id: payload.batchId, paused: false, runner_stage: 'IDLE' });
         await claimAndStart(payload.batchId);
@@ -1372,6 +1427,7 @@ export default defineBackground(() => {
         return { paused: true as const };
       }),
       'runner.resume': wrapHandler<'runner.resume'>(async () => {
+        await assertUpToDate();
         const cp = await loadCheckpoint();
         if (cp.active_batch_id) await getApi().batchAction(cp.active_batch_id, 'resume', {}).catch(() => undefined);
         await saveCheckpoint({ ...cp, paused: false });
@@ -1387,12 +1443,14 @@ export default defineBackground(() => {
       }),
       'runner.getCheckpoint': wrapHandler<'runner.getCheckpoint'>(async () => loadCheckpoint()),
       'ranking.startCollect': wrapHandler<'ranking.startCollect'>(async (payload) => {
+        await assertUpToDate();
         void runRankingCollect(payload.query).catch((e) => {
           rankingProgress = { ...rankingProgress, running: false, done: true, reason: (e as Error).message };
         });
         return { snapshot_local_id: crypto.randomUUID() };
       }),
       'ranking.runPresetBatch': wrapHandler<'ranking.runPresetBatch'>(async (payload) => {
+        await assertUpToDate();
         if (presetBatchProgress.running || rankingProgress.running) throw new Error('已有榜单采集正在执行');
         if (!payload.queries.length) throw new Error('请至少选择一个筛选预设');
         presetBatchProgress = { running: true, current: 0, total: payload.queries.length, completed: 0, failed: 0, errors: [] };
@@ -1459,6 +1517,7 @@ export default defineBackground(() => {
       // ---- 数据查询类：薄透传远程 REST（类型与错误由 api client 包装） ----
       'snapshot.list': wrapHandler<'snapshot.list'>(async (payload) => getApi().listSnapshots(payload ?? {})),
       'snapshot.createFromCurrent': wrapHandler<'snapshot.createFromCurrent'>(async (payload) => {
+        await assertUpToDate();
         // 按来源平台定位页面 → 读取页面筛选 → 合并覆盖项 → 复用榜单抓取流程
         const source: RankingSource = payload?.source ?? payload?.overrides?.source ?? 'ECHOTIK';
         const tab = await findRankingTab(source);
@@ -1551,6 +1610,7 @@ export default defineBackground(() => {
         collectSingleProduct(payload.external_product_id, payload.region),
       ),
       'product.collectImage': wrapHandler<'product.collectImage'>(async (payload) => {
+        await assertUpToDate();
         const url = payload.source_url?.trim();
         if (!url) throw new Error('缺少图片地址');
         const resp = await fetch(url, { credentials: 'omit', cache: 'no-store' });
@@ -1865,6 +1925,7 @@ export default defineBackground(() => {
     const roleRaw = await storageGet('identity_role');
     const displayName = await storageGet('identity_display_name');
     const authNotice = await storageGet('auth_notice');
+    const updateNotice = await storageGet('update_notice');
     const authorized = !!authToken && !!identity.client_id;
     const role = authorized && roleRaw ? (roleRaw === 'ADMIN' ? 'ADMIN' : 'USER') : null;
     const cp = await loadCheckpoint();
@@ -1910,6 +1971,7 @@ export default defineBackground(() => {
         : progress,
       current_product_title: currentProductTitle,
       last_error: null,
+      update_required: updateNotice ?? null,
     };
   }
 

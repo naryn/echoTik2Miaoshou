@@ -58,6 +58,10 @@ export const STORAGE_DEFAULTS = {
   identity_role: null as string | null,
   /** 认证账号显示名 */
   identity_display_name: null as string | null,
+  /** 服务端要求强制更新时缓存的版本信息（null 表示当前已是最新） */
+  update_notice: null as { version: string; download_url: string; notes: string } | null,
+  /** 上次检查插件更新的时间戳（毫秒） */
+  update_checked_at: null as number | null,
 };
 
 export type StorageKey = keyof typeof STORAGE_DEFAULTS;
