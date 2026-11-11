@@ -47,6 +47,8 @@ def test_login_binds_device_and_reuses_session(client, account):
     first = login(client, "device-a")
     assert first["session_id"]
     assert first["client_id"]
+    # 时间字段必须带 UTC 时区标记，浏览器才能换算为本地 +8 时区展示
+    assert first["registered_at"].endswith("+00:00")
 
     me = client.get(
         "/v1/auth/me",

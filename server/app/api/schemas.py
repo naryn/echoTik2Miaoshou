@@ -1,6 +1,6 @@
 """API 请求/响应模型（Pydantic v2）与 ORM 序列化辅助。"""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 
 from pydantic import AfterValidator, BaseModel, Field
@@ -21,8 +21,16 @@ from app.models import (
 
 
 def dt(value: datetime | None) -> str | None:
-    """序列化 UTC 时间为 ISO8601 字符串。"""
-    return value.isoformat() if value else None
+    """序列化 UTC 时间为带时区标记的 ISO8601 字符串。
+
+    数据库统一存 naive UTC，这里补上 +00:00，避免浏览器把 UTC 时间
+    当成本地时间解析，导致管理台时间少 8 小时。
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
 
 
 def _validate_source_platform(value: str) -> str:
