@@ -38,6 +38,7 @@ WEB_CLIENT_VERSION = "web"
 # 无需版本校验的公开路径前缀（更新接口、下载、静态页、文档、网页专用 API）
 VERSION_EXEMPT_PREFIXES = (
     "/healthz",
+    "/favicon.ico",
     "/v1/plugin-update",
     "/plugin-download",
     "/pricing",

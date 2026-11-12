@@ -1,7 +1,34 @@
 from app.mcp.pricing_mcp import handle
 
 
+def test_crossborder_quote_with_gift_weight(client):
+    """赠品重量与赠品成本同时生效：返回含赠品价格，赠品成本只进固定成本。"""
+    response = client.post("/v1/pricing/crossborder/quote", json={
+        "product_cost_rmb": 15,
+        "domestic_extra_cost_rmb": 2,
+        "mxn_per_rmb": 2.78,
+        "quantity": 1,
+        "unit_chargeable_weight_kg": 0.2,
+        "target_net_margin_pct": 20,
+        "merchant_discount_pct": 50,
+        "gift_weight_kg": 9,
+        "gift_cost_rmb": 30,
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert round(data["recommended_sale_price_mxn"], 2) == 164.42
+    assert round(data["recommended_unit_list_price_mxn"], 2) == 228.84
+    gift = data["with_gift"]
+    assert round(gift["total_chargeable_weight_kg"], 2) == 9.2
+    assert round(gift["cost_breakdown_mxn"]["crossborder_shipping"], 2) == 1813
+    assert round(gift["cost_breakdown_mxn"]["gift_cost"], 2) == 83.4
+    assert round(gift["fixed_cost_mxn"], 2) == 1949.66
+    assert round(gift["recommended_sale_price_mxn"], 2) == 3944.99
+    assert round(gift["recommended_unit_list_price_mxn"], 2) == 7789.98
+
+
 def test_crossborder_quote_matches_workbook_example(client):
+    """无赠品时与 Excel 模板一示例完全一致。"""
     response = client.post("/v1/pricing/crossborder/quote", json={
         "product_cost_rmb": 15,
         "domestic_extra_cost_rmb": 2,

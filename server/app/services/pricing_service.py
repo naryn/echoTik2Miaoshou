@@ -39,21 +39,29 @@ def chargeable_weight_kg(length_cm: float, width_cm: float, height_cm: float, ac
     }
 
 
-def quote_crossborder(params: dict) -> dict:
-    """计算跨境直邮正向定价，金额主币种为 MXN，同时返回 RMB 参考值。"""
-    quantity = int(params["quantity"])
-    rate = float(params["mxn_per_rmb"])
-    unit_cost_mxn = (float(params["product_cost_rmb"]) + float(params["domestic_extra_cost_rmb"])) * rate
-    total_weight = quantity * float(params["unit_chargeable_weight_kg"])
-    shipping = shipping_cost_mxn(total_weight)
-    new_customer = float(params["new_customer_discount_pct"]) / 100
-    target_margin = float(params["target_net_margin_pct"]) / 100
-    affiliate_rate = float(params["affiliate_commission_pct"]) / 100
-    ad_rate = float(params["advertising_pct"]) / 100
+def _quote_core(
+    *,
+    quantity: int,
+    unit_cost_mxn: float,
+    total_weight_kg: float,
+    new_customer: float,
+    target_margin: float,
+    affiliate_rate: float,
+    ad_rate: float,
+    discount: float,
+    buyer_shipping: float,
+    rate: float,
+    gift_cost_mxn: float = 0,
+) -> dict:
+    """按指定计费重量计算一组定价结果（费用结构与汇率换算固定）。
+
+    gift_cost_mxn 为整单赠品采购成本，只计入固定成本，不计入单件商品成本。
+    """
+    shipping = shipping_cost_mxn(total_weight_kg)
     denominator = 1 - 0.1597 * (1 - new_customer) - 0.06 - 0.08 - affiliate_rate * (1 - new_customer) - target_margin - ad_rate
     if denominator <= 0:
         raise ValueError("费用率与目标利润率之和过高，无法形成有效售价")
-    sale_price = (quantity * unit_cost_mxn + shipping) / denominator
+    sale_price = (quantity * unit_cost_mxn + gift_cost_mxn + shipping) / denominator
     if sale_price > 1000:
         sale_price += 60
     import_tax = ((sale_price - 4.5 * 17.66) * (1 - new_customer) / 1.335 * 0.335)
@@ -63,18 +71,16 @@ def quote_crossborder(params: dict) -> dict:
     advertising_fee = sale_price * ad_rate
     per_item_fee = quantity * 6
     product_cost = quantity * unit_cost_mxn
-    fixed_cost = product_cost + shipping + per_item_fee
+    fixed_cost = product_cost + gift_cost_mxn + shipping + per_item_fee
     gross_profit = sale_price - fixed_cost
     variable_fees = import_tax + platform_commission + sfp_fee + affiliate_fee + advertising_fee
     net_profit = gross_profit - variable_fees
-    discount = float(params["merchant_discount_pct"]) / 100
     list_price = sale_price / (1 - discount - new_customer)
-    buyer_shipping = float(params["buyer_shipping_paid_per_item_mxn"])
     return {
         "currency": "MXN",
         "exchange_rate_mxn_per_rmb": rate,
         "unit_product_cost_mxn": unit_cost_mxn,
-        "total_chargeable_weight_kg": total_weight,
+        "total_chargeable_weight_kg": total_weight_kg,
         "recommended_sale_price_mxn": sale_price,
         "recommended_list_price_mxn": list_price,
         "recommended_unit_list_price_mxn": list_price / quantity - buyer_shipping * 2,
@@ -86,6 +92,7 @@ def quote_crossborder(params: dict) -> dict:
         "net_margin_pct": net_profit / sale_price * 100,
         "cost_breakdown_mxn": {
             "product_cost": product_cost,
+            "gift_cost": gift_cost_mxn,
             "crossborder_shipping": shipping,
             "per_item_transaction_fee": per_item_fee,
             "import_tax": import_tax,
@@ -102,6 +109,58 @@ def quote_crossborder(params: dict) -> dict:
             "sale_price": sale_price / rate,
             "list_price": list_price / rate,
         },
+    }
+
+
+def quote_crossborder(params: dict) -> dict:
+    """计算跨境直邮正向定价；赠品重量大于 0 时并列返回不含/含赠品两组结果。"""
+    quantity = int(params["quantity"])
+    rate = float(params["mxn_per_rmb"])
+    unit_cost_mxn = (float(params["product_cost_rmb"]) + float(params["domestic_extra_cost_rmb"])) * rate
+    total_weight = quantity * float(params["unit_chargeable_weight_kg"])
+    new_customer = float(params["new_customer_discount_pct"]) / 100
+    target_margin = float(params["target_net_margin_pct"]) / 100
+    affiliate_rate = float(params["affiliate_commission_pct"]) / 100
+    ad_rate = float(params["advertising_pct"]) / 100
+    discount = float(params["merchant_discount_pct"]) / 100
+    buyer_shipping = float(params["buyer_shipping_paid_per_item_mxn"])
+
+    base = _quote_core(
+        quantity=quantity,
+        unit_cost_mxn=unit_cost_mxn,
+        total_weight_kg=total_weight,
+        new_customer=new_customer,
+        target_margin=target_margin,
+        affiliate_rate=affiliate_rate,
+        ad_rate=ad_rate,
+        discount=discount,
+        buyer_shipping=buyer_shipping,
+        rate=rate,
+    )
+    # 赠品重量直接计入包裹计费重量；赠品成本只计入固定成本，不参与商品成本
+    gift_weight = float(params.get("gift_weight_kg") or 0)
+    gift_cost_rmb = float(params.get("gift_cost_rmb") or 0)
+    gift_cost_mxn = gift_cost_rmb * rate
+    with_gift = None
+    if gift_weight > 0 or gift_cost_mxn > 0:
+        with_gift = _quote_core(
+            quantity=quantity,
+            unit_cost_mxn=unit_cost_mxn,
+            total_weight_kg=total_weight + gift_weight,
+            new_customer=new_customer,
+            target_margin=target_margin,
+            affiliate_rate=affiliate_rate,
+            ad_rate=ad_rate,
+            discount=discount,
+            buyer_shipping=buyer_shipping,
+            rate=rate,
+            gift_cost_mxn=gift_cost_mxn,
+        )
+    return {
+        **base,
+        "gift_weight_kg": gift_weight,
+        "gift_cost_rmb": gift_cost_rmb,
+        "with_gift": with_gift,
     }
 
 

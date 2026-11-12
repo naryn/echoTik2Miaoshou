@@ -28,6 +28,8 @@ _QUOTE_SCHEMA = {
         "affiliate_commission_pct": {"type": "number", "default": 0},
         "advertising_pct": {"type": "number", "default": 0},
         "buyer_shipping_paid_per_item_mxn": {"type": "number", "default": 50},
+        "gift_weight_kg": {"type": "number", "default": 0, "description": "赠品总重量（kg），仅计入物流重量"},
+        "gift_cost_rmb": {"type": "number", "default": 0, "description": "赠品采购成本合计（RMB，整单），仅计入固定成本"},
     },
 }
 

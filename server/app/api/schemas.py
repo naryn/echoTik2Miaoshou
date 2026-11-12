@@ -200,6 +200,8 @@ class CrossBorderPricingRequest(BaseModel):
     affiliate_commission_pct: float = Field(default=0, ge=0, lt=90, description="达人佣金率，百分比")
     advertising_pct: float = Field(default=0, ge=0, lt=90, description="预计广告投入率，百分比")
     buyer_shipping_paid_per_item_mxn: float = Field(default=50, ge=0, description="买家预计多付运费，用于上新原价参考")
+    gift_weight_kg: float = Field(default=0, ge=0, le=30, description="赠品总重量，kg；0 表示无赠品，仅计入物流重量")
+    gift_cost_rmb: float = Field(default=0, ge=0, description="赠品采购成本合计（RMB，整单），仅计入固定成本")
 
 
 class ReverseCostRequest(BaseModel):
