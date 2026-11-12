@@ -10,7 +10,7 @@ export default defineConfig({
   modules: ['@wxt-dev/module-vue'],
   manifest: {
     name: 'TK 采集助手',
-    version: '0.1.5',
+    version: '0.2.0',
     description: 'EchoTik 榜单采集并联动 TikTok/妙手 ERP 的浏览器端工具',
     minimum_chrome_version: '120',
     permissions: ['storage', 'tabs', 'scripting', 'alarms', 'notifications'],

@@ -31,7 +31,7 @@ COLLECTED_IMAGES_DIR = os.environ.get(
 CORS_ALLOW_ORIGINS = os.environ.get("CORS_ALLOW_ORIGINS", "*")
 
 # 当前发布的插件版本与下载地址（/v1/plugin-update 与强制更新提示共用）
-PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION", "0.1.5")
+PLUGIN_VERSION = os.environ.get("PLUGIN_VERSION", "0.2.0")
 PLUGIN_DOWNLOAD_URL = os.environ.get(
     "PLUGIN_DOWNLOAD_URL",
     f"http://39.102.73.231:8010/plugin-download/echotik-miaoshou-collector-{PLUGIN_VERSION}-chrome.zip",
