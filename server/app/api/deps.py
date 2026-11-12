@@ -146,3 +146,13 @@ def require_admin(
     if identity.role != "ADMIN":
         raise admin_forbidden("需要管理员权限（auth_users.role=ADMIN）")
     return identity
+
+
+def require_admin_or_client(
+    identity: Identity = Depends(require_identity),
+) -> Identity:
+    """写接口管理员放行：ADMIN 账号可跨客户端操作，普通账号仅归属自身客户端。
+
+    返回 Identity（含 role 字段），由路由层按 role 决定是否跳过 owner 校验。
+    """
+    return identity

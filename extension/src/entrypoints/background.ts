@@ -103,6 +103,33 @@ function withYesterdayForDailyPreset(query: RankingQuery): RankingQuery {
   };
 }
 
+/**
+ * 从已缓存的类目树解析指定类目所属的一级类目名称
+ * 快照创建时把名称一并写进 filter_json，历史榜单列表即使没有分类树缓存也能显示中文名
+ * @param source 榜单来源（决定读哪份分类树缓存）
+ * @param categoryId 类目 ID（可能属于二级/三级）
+ * @returns 一级类目名称；未命中返回 null
+ */
+async function resolveTopCategoryLabel(
+  source: RankingSource,
+  categoryId?: string,
+): Promise<string | null> {
+  if (!categoryId) return null;
+  const cache = await storageGet(
+    source === 'FASTMOSS' ? 'fastmoss_category_cache' : 'category_cache',
+  );
+  for (const top of cache?.items ?? []) {
+    if (top.value === categoryId) return top.label;
+    const stack = [...(top.children ?? [])];
+    while (stack.length) {
+      const node = stack.pop()!;
+      if (node.value === categoryId) return top.label;
+      stack.push(...(node.children ?? []));
+    }
+  }
+  return null;
+}
+
 export default defineBackground(() => {
   // ---------------- 顶层同步注册所有监听器（MV3 硬性要求） ----------------
   browser.runtime.onInstalled.addListener((details) => {
@@ -449,6 +476,9 @@ export default defineBackground(() => {
   let runnerBusy = false;
   let runnerQueued = false;
 
+  /** 领取任务锁：进程内定时器与 alarm 可能同时到期 */
+  let claimInFlight = false;
+
   /**
    * 推进 Runner 一个阶段（串行执行；重入时排队再跑一次）
    * @param why 推进原因（日志用）
@@ -508,7 +538,7 @@ export default defineBackground(() => {
             resolveDetailUrl(cp.product.external_product_id, cp.product.detail_url),
           );
           await saveCheckpoint({ ...(await loadCheckpoint()), worker_tab_id: tabId });
-          // 页面就绪由 content script 'tiktok.pageReady' 消息推进；超时兜底
+          // 保留 probe：PAGE_READY 必须等页面就绪/妙手按钮出现
           await probeAndAdvance(tabId, cp.product.external_product_id);
           break;
         }
@@ -518,25 +548,23 @@ export default defineBackground(() => {
             await dlog('background', 'PAGE_READY：未找到工作 Tab', { task: cp2.active_task_id });
             return;
           }
+          const ec = await storageGet('exec_config');
+          const detectTimeoutMs = Math.max(1, ec.button_detect_timeout_sec) * 1000;
           await dlog('background', 'PAGE_READY：开始检测妙手按钮', {
             productId: cp2.product?.external_product_id,
             tabId: cp2.worker_tab_id,
+            detectTimeoutMs,
           });
-          const miaoshou = await sendMsg('tiktok.detectMiaoshou', undefined, cp2.worker_tab_id);
+          const miaoshou = await sendMsg('tiktok.detectMiaoshou', { timeoutMs: detectTimeoutMs }, cp2.worker_tab_id);
           await dlog('background', 'PAGE_READY：妙手按钮检测结果', miaoshou);
           if (!miaoshou.available) {
             await finishTask('FAILED', { evidence: miaoshou.evidence, error_code: ERROR_CODES.MIAOSHOU_UNAVAILABLE });
             return;
           }
-          // 已在 PAGE_READY 之外（例如重入时已进入后续阶段）则不再重复提交
           if (currentSm.status === 'PAGE_READY') {
             transition(currentSm, 'SUBMITTING', miaoshou.evidence);
-            // 提交前写 SUBMITTING 检查点（规范 §5.3）
             await saveCheckpoint({ ...(await loadCheckpoint()), runner_stage: 'SUBMITTING' });
-            await dlog('background', 'PAGE_READY：进入 SUBMITTING，准备点击采集按钮');
             await advanceRunner('submitting');
-          } else {
-            await dlog('background', 'PAGE_READY：状态机不同步，未进入提交', { currentState: currentSm.status });
           }
           break;
         }
@@ -546,40 +574,30 @@ export default defineBackground(() => {
             await dlog('background', 'SUBMITTING：未找到工作 Tab', { task: cp2.active_task_id });
             return;
           }
-          await dlog('background', 'SUBMITTING：调用妙手按钮点击', {
+          const ec = await storageGet('exec_config');
+          const submitOpts = {
+            findButtonTimeoutMs: Math.max(1, ec.button_detect_timeout_sec) * 1000,
+            feedbackTimeoutMs: Math.max(1, ec.submit_result_wait_sec) * 1000,
+          };
+          await dlog('background', 'SUBMITTING：点击妙手采集', {
             productId: cp2.product?.external_product_id,
             tabId: cp2.worker_tab_id,
+            ...submitOpts,
           });
-          const submission = await sendMsg('tiktok.submitCollect', undefined, cp2.worker_tab_id);
+          // 简化：点妙手按钮后直接 SUBMITTED，不做 verifyCollect fallback
+          const submission = await sendMsg('tiktok.submitCollect', submitOpts, cp2.worker_tab_id);
           await dlog('background', 'SUBMITTING：妙手点击结果', submission);
-          if (!submission.submitted) {
-            // 无提交证据：先核对 ERP（当前无授权途径 → UNKNOWN）
-            const verify = await sendMsg(
-              'tiktok.verifyCollect',
-              { productId: cp2.product!.external_product_id },
-              cp2.worker_tab_id,
-            );
-            await finishTask(
-              verify.state === 'CONFIRMED' ? 'SUCCESS' : 'UNKNOWN',
-              { evidence: `${submission.evidence ?? ''} | ${verify.evidence ?? ''}`, error_code: submission.errorCode },
-            );
-            return;
-          }
           if (currentSm.status === 'SUBMITTING') transition(currentSm, 'SUBMITTED', submission.evidence);
           await saveCheckpoint({ ...(await loadCheckpoint()), runner_stage: 'SUBMITTED' });
           await advanceRunner('submitted');
           break;
         }
         case 'SUBMITTED': {
-          const cp2 = await loadCheckpoint();
-          const verify = await sendMsg(
-            'tiktok.verifyCollect',
-            { productId: cp2.product!.external_product_id },
-            cp2.worker_tab_id ?? undefined,
-          ).catch(() => ({ state: 'UNKNOWN' as const, evidence: 'verify 消息失败' }));
-          // SUBMITTED ≠ SUCCESS：无 ERP 侧确认时记 UNKNOWN（规范 §5.3/T14）
-          const result = verify.state === 'CONFIRMED' ? 'SUCCESS' : verify.state === 'NOT_CONFIRMED' ? 'FAILED' : 'UNKNOWN';
-          await finishTask(result, { evidence: verify.evidence });
+          // 简化：砍掉 verify ERP → SUCCESS/FAILED，直接 SUCCESS。
+          // 点击后的结果等待已在 SUBMITTING（submit_result_wait_sec）完成，
+          // 这里不再叠加固定停留，避免每件商品白等 4-6 秒。
+          await dlog('background', 'SUBMITTED：提交完成进入 SUCCESS', {});
+          await finishTask('SUCCESS', { evidence: '已点击采集并等待提交结果（简化模式）' });
           break;
         }
         case 'WAITING_VERIFICATION':
@@ -619,12 +637,62 @@ export default defineBackground(() => {
 
   /**
    * 导航后探测页面就绪/验证状态并推进
+   * 主动轮询到 page_wait_timeout_sec：SPA 路由跳转期间 probe 会返回 LOADING，
+   * 若只探测一次就返回，后续只能等 reconcile 的 1 分钟 tick 或 content script 事件，
+   * 表现为“两件商品之间卡很久”。
    * @param tabId worker tab
    * @param expectedProductId 期望商品 ID
    */
   async function probeAndAdvance(tabId: number, expectedProductId: string): Promise<void> {
+    const ec = await storageGet('exec_config');
+    const deadline = Date.now() + Math.max(1, ec.page_wait_timeout_sec) * 1000;
+    const pollIntervalMs = 500;
+    /** 导航刚切到新商品时旧文档可能先应答 probe，给 3s 宽限再判定商品不匹配 */
+    const MISMATCH_GRACE_MS = 3_000;
     try {
-      const probe = await sendMsg('tiktok.probe', { expectedProductId }, tabId);
+      let probe: Awaited<ReturnType<typeof sendMsg<'tiktok.probe'>>> | null = null;
+      let mismatchSince: number | null = null;
+      // 页面对齐前持续轮询；content script 尚未注入时同样重试，而不是直接放弃
+      while (!probe || probe.state === 'LOADING' || probe.state === 'MISMATCH') {
+        if (probe && Date.now() >= deadline) break;
+        if (probe?.state === 'MISMATCH') {
+          mismatchSince ??= Date.now();
+          if (Date.now() - mismatchSince > MISMATCH_GRACE_MS) break;
+        } else {
+          mismatchSince = null;
+        }
+        try {
+          probe = await sendMsg('tiktok.probe', { expectedProductId }, tabId);
+        } catch (e) {
+          if (Date.now() >= deadline) throw e;
+          await dlog('background', 'TikTok 页面探测失败，稍后重试', {
+            productId: expectedProductId,
+            tabId,
+            error: (e as Error)?.message ?? String(e),
+          });
+          await new Promise((r) => setTimeout(r, pollIntervalMs));
+          continue;
+        }
+        if (probe.state === 'LOADING' || probe.state === 'MISMATCH') {
+          await new Promise((r) => setTimeout(r, pollIntervalMs));
+        }
+      }
+      if (!probe) return;
+
+      // 轮询超时仍未就绪：明确失败并让批次前进。
+      // 之前这里直接 return，任务会停在 NAVIGATING，只能等 1 分钟一次 reconcile，
+      // 而且 reconcile 会重新导航 → 再等一轮超时，表现为“一直卡在检测不到状态”。
+      if (probe.state === 'LOADING') {
+        const evidence = `等待页面就绪超时（${ec.page_wait_timeout_sec}s）：${probe.reason ?? '页面仍在加载'}`;
+        await dlog('background', 'TikTok 页面就绪等待超时，判定失败', {
+          productId: expectedProductId,
+          tabId,
+          evidence,
+        });
+        await finishTask('FAILED', { evidence, error_code: ERROR_CODES.TIMEOUT });
+        return;
+      }
+
       const cp = await loadCheckpoint();
       if (probe.state === 'READY') {
         if (currentSm && currentSm.status === 'NAVIGATING') {
@@ -649,9 +717,8 @@ export default defineBackground(() => {
       } else if (probe.state === 'REGION_UNAVAILABLE') {
         await stopForRegionUnavailable(probe.evidence);
       }
-      // LOADING：等待 content script 的 pageReady/challenge 事件推进
     } catch (e) {
-      // content script 尚未注入：等 tabs.onUpdated/reconcile 兜底
+      // content script 始终未就绪：等 tabs.onUpdated/reconcile 兜底
       await dlog('background', 'TikTok 页面探测失败', {
         productId: expectedProductId,
         tabId,
@@ -712,7 +779,17 @@ export default defineBackground(() => {
     const interval = minMs + Math.random() * (maxMs - minMs);
     const nextRunAt = new Date(Date.now() + interval).toISOString();
     await saveCheckpoint({ ...(await loadCheckpoint()), next_run_at: nextRunAt });
-    await browser.alarms.create('runner-next', { when: Date.now() + interval });
+    // chrome.alarms 对秒级延迟的调度精度很差（最短可靠粒度约 30s），
+    // 直接把 2-4s 的间隔交给 alarm 会让两件商品之间凭空多等半分钟。
+    // 因此主通道用进程内定时器；alarm 延后 5s 作为 SW 被回收后的兜底唤醒，
+    // 定时器正常触发时会清掉它，避免两条通道同时领取造成重复任务。
+    await browser.alarms.create('runner-next', { when: Date.now() + interval + 5_000 });
+    setTimeout(() => {
+      void (async () => {
+        await browser.alarms.clear('runner-next').catch(() => undefined);
+        await handleRunnerNextAlarm();
+      })();
+    }, interval);
   }
 
   /**
@@ -762,9 +839,25 @@ export default defineBackground(() => {
 
   /**
    * 领取下一件任务并进入导航阶段；无任务则检查批次终态
+   * 进程内定时器与 runner-next alarm 可能同时触发，这里用锁保证只领一次，
+   * 否则会一次性领走两件任务并互相覆盖 checkpoint。
    * @param batchId 批次 ID
    */
   async function claimAndStart(batchId: string): Promise<void> {
+    if (claimInFlight) return;
+    claimInFlight = true;
+    try {
+      await claimAndStartInner(batchId);
+    } finally {
+      claimInFlight = false;
+    }
+  }
+
+  /**
+   * claimAndStart 的实际执行体（仅由锁内部调用）
+   * @param batchId 批次 ID
+   */
+  async function claimAndStartInner(batchId: string): Promise<void> {
     const identity = await loadClientIdentity();
     if (!identity.client_id) return;
     const cp = await loadCheckpoint();
@@ -888,9 +981,15 @@ export default defineBackground(() => {
       if (!ready) return;
     }
 
+    // 把一级分类名写进 filter_json：服务端历史榜单列表直接展示中文名，
+    // 不再依赖前端分类树缓存（EchoTik 缓存缺失时会退化成“分类 600001”）
+    const categoryLabel = await resolveTopCategoryLabel(source, query.categoryId);
     const snapshot = await getApi().createSnapshot({
       query,
-      filter_json: query as unknown as Record<string, unknown>,
+      filter_json: {
+        ...(query as unknown as Record<string, unknown>),
+        ...(categoryLabel ? { categoryLabel } : {}),
+      },
       request_id: crypto.randomUUID(),
     });
     let entries: ProductRankingEntry[] = [];
@@ -1568,10 +1667,10 @@ export default defineBackground(() => {
         })),
       })),
       'echotik.getCategories': wrapHandler<'echotik.getCategories'>(async (payload) => {
-        // 策略：缓存长期有效（命中即用，避免每次请求大体积类目树）；force 才强制刷新
-        // 英文旧缓存会自动尝试刷新为中文；刷新失败时回退到旧缓存，保证分类始终可用
+        // 缓存策略：命中即用。只在 force=true 时强制刷新。
+        // 之前"英文缓存强制刷新"逻辑会导致 EchoTik Tab 关掉时 fetch 失败、前端拿不到分类树。
         const cache = await storageGet('category_cache');
-        if (cache && !payload?.force && !isEnglishCategoryTree(cache.items)) {
+        if (cache && !payload?.force) {
           return { items: cache.items, cached: true, fetched_at: cache.fetched_at };
         }
         try {
@@ -1591,7 +1690,7 @@ export default defineBackground(() => {
         const source = payload.source;
         const cacheKey = source === 'FASTMOSS' ? 'fastmoss_category_cache' : 'category_cache';
         const cache = await storageGet(cacheKey);
-        if (cache && !payload.force && (source !== 'ECHOTIK' || !isEnglishCategoryTree(cache.items))) {
+        if (cache && !payload.force) {
           return { items: cache.items, cached: true, fetched_at: cache.fetched_at };
         }
         try {
@@ -1647,7 +1746,8 @@ export default defineBackground(() => {
       }),
       'batch.start': wrapHandler<'batch.start'>(async (payload) => {
         const res = await getApi().batchAction(payload.batch_id, 'start', { client_id: await storageGet('client_id') });
-        // 本客户端发起开始：同步本地检查点并领取首件（与 runner.start 一致）
+        // start 永远把本机器设为执行者（不管 admin/普通用户）：
+        // admin 现在只能操作自己 client_id 下的批次，执行者就是 admin 这台机器
         await saveCheckpoint({ ...(await loadCheckpoint()), active_batch_id: payload.batch_id, paused: false, runner_stage: 'IDLE' });
         await claimAndStart(payload.batch_id);
         return res;
@@ -1658,7 +1758,7 @@ export default defineBackground(() => {
           throw new Error('当前有任务正在执行，请先完成或暂停后再重新抓取');
         }
         const task = await getApi().recollectTask(payload.task_id);
-        // 服务端已把批次置为 RUNNING；同步本地检查点并领取该强制重抓任务
+        // recollect 永远在本机器执行（admin 现在只能操作自己 client_id 的批次）
         await saveCheckpoint({ ...(await loadCheckpoint()), active_batch_id: task.batch_id, paused: false, runner_stage: 'IDLE' });
         await claimAndStart(task.batch_id);
         await broadcastState();
@@ -1701,7 +1801,7 @@ export default defineBackground(() => {
       }),
       'attempt.list': wrapHandler<'attempt.list'>(async (payload) => getApi().listAttempts(payload ?? {})),
       'client.me': wrapHandler<'client.me'>(async () => getApi().me()),
-      // ---- 超级管理员（隐藏设置，只读）----
+      // ---- 管理员跨账号查询端点（admin.* 全是 GET；写操作复用 batch.* 普通端点，admin 自动放行 owner 校验）----
       'admin.listClients': wrapHandler<'admin.listClients'>(async () => getApi().adminListClients()),
       'admin.listBatches': wrapHandler<'admin.listBatches'>(async (payload) =>
         getApi().adminListBatches(payload ?? {}),

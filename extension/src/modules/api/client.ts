@@ -310,7 +310,7 @@ export function createApiClient(opts: ApiClientOptions) {
         paginatedSchema(SnapshotSummarySchema),
       ) as Promise<Paginated<SnapshotSummary>>;
     },
-    /** 管理员：跨客户端读取全部历史榜单快照（只读）。 */
+    /** 管理员：跨客户端读取全部历史榜单快照（查询端点只读；创建批次/控制状态走普通 batches 端点，admin 自动放行）。 */
     adminListSnapshots(params: {
       region?: string;
       ranking_type?: string;
@@ -478,7 +478,7 @@ export function createApiClient(opts: ApiClientOptions) {
       return request('GET', '/v1/plugin-update', null, null, false) as Promise<PluginUpdateInfo>;
     },
 
-    // ---- 管理员（auth_users.role=ADMIN，只读）----
+    // ---- 管理员跨账号查询（auth_users.role=ADMIN）----
     /** 管理员：全量客户端列表（不含 token，用于归属筛选） */
     adminListClients() {
       return request('GET', '/v1/admin/clients', null, AdminClientListSchema, false) as Promise<AdminClientList>;

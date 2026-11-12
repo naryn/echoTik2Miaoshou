@@ -133,6 +133,10 @@ button.danger:hover { background: #fef2f2; border-color: #ef4444; }
 button.link { border: none; background: none; color: #2563eb; cursor: pointer; font-size: 12px; padding: 2px 4px; }
 button.link:hover { text-decoration: underline; }
 
+/* 他人批次行：整行调灰，强调"只读" */
+.row-other { opacity: 0.55; }
+.row-other:hover { opacity: 0.72; }
+
 /* ---- 来源渠道 Tab ---- */
 .tabs { display: flex; gap: 4px; margin-bottom: 10px; border-bottom: 1px solid #e5e7eb; }
 .tabs .tab {

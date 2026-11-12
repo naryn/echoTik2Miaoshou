@@ -124,6 +124,8 @@ export const SnapshotSummarySchema = z.object({
   ranking_type: z.string().nullable().optional(),
   ranking_variant: z.string().nullable().optional(),
   category_id: z.string().nullable().optional(),
+  /** 服务端 join Category 表解析出的一级分类名；没解析到时前端 fallback 用 category_id */
+  category_name: z.string().nullable().optional(),
   period_start: z.string().nullable().optional(),
   period_end: z.string().nullable().optional(),
   capture_started_at: z.string().nullable().optional(),

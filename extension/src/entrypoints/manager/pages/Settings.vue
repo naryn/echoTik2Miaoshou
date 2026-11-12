@@ -33,7 +33,7 @@ const tiktokTabs = ref<{ id?: number; title?: string; url?: string }[]>([]);
 /** 当前工作 Tab */
 const workerTabId = ref<number | null>(null);
 /** 执行参数 */
-const exec = ref({ interval_min_sec: 15, interval_max_sec: 30, batch_max: 200, page_wait_timeout_sec: 30, button_detect_timeout_sec: 15, submit_result_wait_sec: 20, max_retries: 2 });
+const exec = ref({ interval_min_sec: 2, interval_max_sec: 4, batch_max: 200, page_wait_timeout_sec: 30, button_detect_timeout_sec: 15, submit_result_wait_sec: 20, max_retries: 2 });
 /** 行为配置 */
 const behavior = ref({ continue_on_panel_close: true, notify_on_exception: true, log_retention_days: 7 });
 /** 数据统计 */

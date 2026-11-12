@@ -219,7 +219,7 @@ onMounted(async () => {
         历史榜单
         <span class="muted small">共 {{ total }} 个快照，按最新采集时间排序 · EchoTik：采集经页面同源接口，需保持榜单页登录态。</span>
       </h3>
-      <p v-if="isAdmin" class="muted small">管理员只读视图：展示所有账号的历史榜单快照。</p>
+      <p v-if="isAdmin" class="muted small">管理员视图：展示所有账号的历史榜单快照；创建批次将归属到管理员自身客户端。</p>
       <div class="form-row">
         <label>数据来源</label>
         <select v-model="filter.source_platform" @change="applyFilter"><option value="">全部</option><option v-for="s in sources" :key="s.id" :value="s.id">{{ s.label }}</option></select>
@@ -235,7 +235,7 @@ onMounted(async () => {
     <div v-if="loading" class="muted small">加载中…</div>
     <div v-else-if="!snapshots.length" class="empty">暂无历史快照。请在「榜单采集」完成一次抓取。</div>
     <div v-else class="card" style="padding:8px">
-      <div v-if="!isAdmin" class="snapshot-batch-toolbar">
+      <div class="snapshot-batch-toolbar">
         <span class="muted small">已选 {{ selectedSnapshotIds.length }} 个快照；同一商品会自动去重。</span>
         <button
           class="primary"
@@ -245,19 +245,19 @@ onMounted(async () => {
       </div>
       <table class="list">
         <thead><tr>
-          <th v-if="!isAdmin" class="snapshot-check"><input type="checkbox" :checked="allCurrentPageSelected" aria-label="勾选当前页全部快照" @change="toggleCurrentPageSnapshots" /></th>
+          <th class="snapshot-check"><input type="checkbox" :checked="allCurrentPageSelected" aria-label="勾选当前页全部快照" @change="toggleCurrentPageSnapshots" /></th>
           <th>快照</th><th v-if="isAdmin">客户端</th><th>站点</th><th>榜单/周期</th><th>一级分类</th><th>行数</th><th>采集时间</th><th>状态</th><th>操作</th>
         </tr></thead>
         <tbody><tr v-for="s in snapshots" :key="s.snapshot_id">
-          <td v-if="!isAdmin" class="snapshot-check"><input v-model="selectedSnapshotIds" type="checkbox" :value="s.snapshot_id" :aria-label="`选择快照 ${s.snapshot_id}`" /></td>
+          <td class="snapshot-check"><input v-model="selectedSnapshotIds" type="checkbox" :value="s.snapshot_id" :aria-label="`选择快照 ${s.snapshot_id}`" /></td>
           <td class="mono">{{ s.snapshot_id.slice(0, 8) }}<div class="small"><span class="badge info">{{ sourceLabel(s.source_platform) }}</span></div></td>
           <td v-if="isAdmin" class="mono small">{{ s.client_id?.slice(0, 8) ?? '—' }}</td>
           <td>{{ s.region ?? '—' }}</td>
           <td class="small">{{ variantLabel(s.ranking_variant, s.source_platform) }}<template v-if="s.ranking_variant !== 'products'"> / {{ s.ranking_type ?? '—' }}</template><div class="muted">{{ s.period_start ?? '—' }}</div></td>
-          <td class="small">{{ topCategoryLabel(s.category_id, s.source_platform) }}</td>
+          <td class="small">{{ s.category_name ?? topCategoryLabel(s.category_id, s.source_platform) }}</td>
           <td>{{ s.total_entries ?? '—' }}</td><td class="small">{{ formatTime(s.capture_started_at) }}</td>
           <td><span :class="statusBadgeClass(s.status)">{{ statusText(s.status) }}</span></td>
-          <td><button class="link" @click="viewProducts(s)">查看商品</button><template v-if="!isAdmin"><button class="link" @click="recollect(s)">重新获取</button><button class="link" @click="createBatch(s)">创建 ERP 批次</button></template></td>
+          <td><button class="link" @click="viewProducts(s)">查看商品</button><button class="link" @click="recollect(s)">重新获取</button><button class="link" @click="createBatch(s)">创建 ERP 批次</button></td>
         </tr></tbody>
       </table>
       <div class="pager">

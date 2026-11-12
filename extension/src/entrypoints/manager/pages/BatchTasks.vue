@@ -9,7 +9,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { sendMsg } from '@/shared/messaging';
-import type { AttemptItem, BatchItem, ClientMe, Paginated, TaskItem } from '@/shared/types';
+import type { AttemptItem, BatchItem, CategoryNode, ClientMe, Paginated, TaskItem } from '@/shared/types';
 import { BATCH_STATUSES } from '@/shared/types';
 import type { MessageMap } from '@/shared/types/messages';
 import { refreshState, store } from '../store';
@@ -48,7 +48,7 @@ function sourceLabel(p?: string | null): string {
 
 // ---------------- 批次列表 ----------------
 
-/** 是否管理员角色（auth_users.role=ADMIN 时读取全部账号数据，只读） */
+/** 是否管理员角色（auth_users.role=ADMIN 时跨账号读取全量数据并可控制任意批次） */
 const isAdmin = computed(() => store.state?.role === 'ADMIN');
 /** 管理员：全量客户端（用于归属筛选与展示） */
 const adminClients = ref<ClientMe[]>([]);
@@ -254,43 +254,68 @@ async function runPrecheck(): Promise<boolean> {
   }
   const e = precheck.value;
   if (!e.server.connected) precheckErrors.value.push('远程服务器不可达');
-  if (!e.echotik.tab_found) precheckErrors.value.push('未找到 EchoTik 页面');
-  if (e.echotik.logged_in === false) precheckErrors.value.push('EchoTik 未登录');
-  if (e.miaoshou.checked && e.miaoshou.available === false) precheckErrors.value.push('妙手按钮未检测到（TikTok 工作页）');
+  // 批次采集只依赖妙手 ERP 插件（EchoTik/FastMoss 榜单是快照来源，跑批不需要再开它们）
+  if (e.miaoshou.checked && e.miaoshou.available === false) precheckErrors.value.push('妙手 ERP 插件未登录或不可用');
   return precheckErrors.value.length === 0;
 }
 
 /**
- * 批次动作（开始/暂停/继续/停止/失败重试），反馈以真实服务端响应为准
- * @param action 动作
+ * 判断批次是否归属于当前登录身份（admin 或普通用户自己的 client_id）。
+ * 管理员能看全量，但只能操作自己 client_id 下的批次；别人的批次只能查看，操作按钮全灰。
+ * 普通用户：天然只有自己 client_id 的批次，永远返回 true。
+ *
+ * @param b 目标批次
  */
-async function batchAction(action: 'start' | 'pause' | 'resume' | 'cancel' | 'retryFailed'): Promise<void> {
-  if (isAdmin.value || !detail.value || acting.value) return;
-  errorText.value = null;
-  feedback.value = null;
-  // 开始前做运行前检查
-  if (action === 'start' || action === 'resume') {
-    const okRun = await runPrecheck();
-    if (!okRun) return; // 展示具体错误，由用户点击"重新检测"
+function isMyBatch(b?: BatchItem | null): boolean {
+  if (!b) return false;
+  const selfId = store.state?.client_id;
+  if (!selfId) return false;
+  return b.client_id === selfId;
+}
+
+/** 当前互斥冲突缓存（start/resume 被拦截时记录下来，便于 UI 一键停止冲突批次） */
+const conflictBatchId = ref<string | null>(null);
+
+/**
+ * 判断某批次是否可以 start/resume（仅在属于自己时才检查冲突，别人的批次不能操作）。
+ * 互斥作用域固定为当前登录身份自己的 client_id。
+ * @param b 目标批次
+ * @returns null 表示可以 start；否则返回冲突批次
+ */
+function activeConflictFor(b: BatchItem): BatchItem | null {
+  if (!isMyBatch(b)) return null; // 别人的批次不能操作，不参与互斥判断
+  const selfId = store.state?.client_id;
+  if (!selfId) return null;
+  // ① 本客户端 runner checkpoint 里已绑别的活跃批次
+  const state = store.state;
+  if (state?.active_batch_id && state.active_batch_id !== b.batch_id && state.client_id === selfId) {
+    const hit = (batches.value?.items ?? []).find((x) => x.batch_id === state.active_batch_id);
+    if (hit) return hit;
+    return { ...b, batch_id: state.active_batch_id, status: 'RUNNING', client_id: selfId } as BatchItem;
   }
+  // ② 批次列表里自己 client_id 下有别的活跃状态
+  return (batches.value?.items ?? []).find(
+    (x) => x.batch_id !== b.batch_id
+      && ACTIVE_BATCH_STATUSES.has(x.status)
+      && x.client_id === selfId,
+  ) ?? null;
+}
+
+/**
+ * 一键停止冲突批次（用户被拦截后最常见的后续动作）
+ */
+async function stopConflictAndRetryStart(): Promise<void> {
+  if (!conflictBatchId.value) return;
+  const target = (batches.value?.items ?? []).find((x) => x.batch_id === conflictBatchId.value);
+  if (!target) return;
   acting.value = true;
+  errorText.value = null;
   try {
-    const id = detail.value.batch_id;
-    let updated: BatchItem;
-    if (action === 'start') updated = await sendMsg('batch.start', { batch_id: id });
-    else if (action === 'pause') updated = await sendMsg('batch.pause', { batch_id: id });
-    else if (action === 'resume') updated = await sendMsg('batch.resume', { batch_id: id });
-    else if (action === 'cancel') updated = await sendMsg('batch.cancel', { batch_id: id });
-    else {
-      updated = await sendMsg('batch.retryFailed', { batch_id: id, idempotency_key: uuid() });
-      feedback.value = `补采批次已创建：${updated.batch_id.slice(0, 8)}（仅含失败任务，关联原批次）。`;
-      detail.value = updated;
-      await refreshState();
-      return;
-    }
-    detail.value = updated;
-    await refreshState();
-    await loadTasks();
+    await sendMsg('batch.cancel', { batch_id: target.batch_id });
+    conflictBatchId.value = null;
+    await loadBatches();
+    await refreshState().catch(() => undefined);
+    feedback.value = `冲突批次已停止（${target.batch_id.slice(0, 8)}），现在可以开始了。`;
   } catch (e) {
     errorText.value = classifyError(e).text;
   } finally {
@@ -299,11 +324,93 @@ async function batchAction(action: 'start' | 'pause' | 'resume' | 'cancel' | 're
 }
 
 /**
+ * 批次动作（开始/暂停/继续/停止/失败重试）。
+ * 管理员权限：能看所有人的批次，能操作的仅限自己 client_id 下的；
+ *   别人的批次按钮灰 + tooltip，调进来也直接拦。
+ * 普通用户：天然只看到自己的。
+ *
+ * 互斥规则（仅自己 client_id 范围内生效）：
+ *   同 client_id 同时只能一个活跃批次。互斥依据是 store.state.active_batch_id
+ *   （本地 runner checkpoint）和 batches 列表里同 client_id 的 RUNNING/PAUSED 等。
+ *   服务端状态机永远兜底（409 BATCH_ALREADY_ACTIVE）。
+ *
+ * @param target 目标批次；传 undefined 时取 detail.value（详情层模式）
+ * @param action 动作
+ */
+async function batchActionFor(target: BatchItem | undefined, action: 'start' | 'pause' | 'resume' | 'cancel' | 'retryFailed'): Promise<void> {
+  const batch = target ?? detail.value;
+  if (!batch || acting.value) return;
+  errorText.value = null;
+  feedback.value = null;
+
+  // 权限：只能操作自己 client_id 下的批次
+  if (!isMyBatch(batch)) {
+    const ownerName = isAdmin.value ? clientLabel(batch.client_id) : '';
+    errorText.value = `⚠ 这是「${ownerName}」的批次，您没有操作权限。管理员仅可查看全量数据，只能操作自己创建/归属的批次。`;
+    return;
+  }
+
+  // 跨批次互斥：start/resume 必须等自己 client_id 没有活跃批次
+  if (action === 'start' || action === 'resume') {
+    const conflict = activeConflictFor(batch);
+    if (conflict) {
+      conflictBatchId.value = conflict.batch_id;
+      errorText.value = `⚠ 请先停止其他任务再继续。已有活跃批次：${conflict.batch_id.slice(0, 8)}（${statusText(conflict.status)}）`;
+      return;
+    }
+    // 开始/继续前做运行前检查（本客户端环境）
+    const okRun = await runPrecheck();
+    if (!okRun) return;
+  }
+
+  acting.value = true;
+  try {
+    const id = batch.batch_id;
+    let updated: BatchItem;
+    if (action === 'start') updated = await sendMsg('batch.start', { batch_id: id });
+    else if (action === 'pause') updated = await sendMsg('batch.pause', { batch_id: id });
+    else if (action === 'resume') updated = await sendMsg('batch.resume', { batch_id: id });
+    else if (action === 'cancel') updated = await sendMsg('batch.cancel', { batch_id: id });
+    else {
+      updated = await sendMsg('batch.retryFailed', { batch_id: id, idempotency_key: uuid() });
+      feedback.value = `补采批次已创建：${updated.batch_id.slice(0, 8)}（仅含失败任务，关联原批次）。`;
+      if (!target) detail.value = updated;
+      await loadBatches();
+      await refreshState().catch(() => undefined);
+      return;
+    }
+    if (!target) {
+      detail.value = updated;
+      await loadTasks();
+    }
+    await loadBatches();
+    await refreshState().catch(() => undefined);
+  } catch (e) {
+    errorText.value = classifyError(e).text;
+  } finally {
+    acting.value = false;
+  }
+}
+
+/** 详情层专用包装，列表行直接调 batchActionFor(b, action) */
+function batchAction(action: 'start' | 'pause' | 'resume' | 'cancel' | 'retryFailed'): Promise<void> {
+  return batchActionFor(undefined, action);
+}
+
+/**
  * 单条重新抓取：服务端重置为待抓取并跳过去重，本客户端随后领取并打开详情页
  * @param t 目标任务
  */
 async function recollectTask(t: TaskItem): Promise<void> {
-  if (isAdmin.value || acting.value) return;
+  if (acting.value) return;
+  // 权限：只能重新抓取自己 client_id 下的任务
+  const batch = (batches.value?.items ?? []).find((b) => b.batch_id === t.batch_id)
+    ?? (detail.value?.batch_id === t.batch_id ? detail.value : null);
+  if (batch && !isMyBatch(batch)) {
+    const ownerName = isAdmin.value ? clientLabel(batch.client_id) : '';
+    errorText.value = `⚠ 这是「${ownerName}」的任务，您没有重新抓取的权限。`;
+    return;
+  }
   errorText.value = null;
   feedback.value = null;
   acting.value = true;
@@ -327,6 +434,31 @@ async function recollectTask(t: TaskItem): Promise<void> {
 const VARIANT_LABELS: Record<string, string> = { 'top-sold': '热销榜', 'hot-sell': '热推榜', 'news-burst': '新品榜', products: '商品库' };
 const TYPE_LABELS: Record<string, string> = { daily: '日榜', weekly: '周榜', monthly: '月榜' };
 
+/** EchoTik 分类树缓存（用于 category_id → 分类名解析） */
+const categories = ref<CategoryNode[]>([]);
+/** FastMoss 一级分类独立缓存 */
+const fastMossCategories = ref<CategoryNode[]>([]);
+
+/**
+ * 将任意层级分类 ID 映射为其所属一级分类名称；未命中时回落为原始 ID 字符串。
+ * @param categoryId 分类 ID（EchoTik 原始值或 FastMoss value）
+ * @param source 来源平台，用于选择对应分类树
+ */
+function topCategoryLabel(categoryId?: string | null, source?: string | null): string {
+  if (!categoryId) return '全部分类';
+  const tree = source === 'FASTMOSS' ? fastMossCategories.value : categories.value;
+  for (const top of tree) {
+    if (top.value === categoryId) return top.label;
+    const stack = [...(top.children ?? [])];
+    while (stack.length) {
+      const node = stack.pop()!;
+      if (node.value === categoryId) return top.label;
+      stack.push(...(node.children ?? []));
+    }
+  }
+  return categoryId;
+}
+
 /**
  * 来源榜单条件展示：站点、榜单、类型、类目、榜单日期、快照条数
  * 快照缺失（按商品 ID 手工建批）时返回 null
@@ -347,17 +479,23 @@ const snapshotInfo = computed(() => {
     region: (s.region ?? '—').toUpperCase(),
     variant: VARIANT_LABELS[s.ranking_variant ?? ''] ?? s.ranking_variant ?? '—',
     type: TYPE_LABELS[s.ranking_type ?? ''] ?? s.ranking_type ?? '—',
-    category: s.category_id ?? '全部',
+    category: s.category_name ?? topCategoryLabel(s.category_id, detail.value?.source_platform ?? s.source_platform),
     period,
     total: s.total_entries ?? 0,
   };
 });
 
-const canStart = computed(() => !!detail.value && ['DRAFT', 'READY', 'PAUSED', 'CANCELLED'].includes(detail.value.status));
-const canPause = computed(() => detail.value?.status === 'RUNNING');
-const canResume = computed(() => detail.value?.status === 'PAUSED');
-const canCancel = computed(() => !!detail.value && !['COMPLETED', 'COMPLETED_WITH_ERRORS', 'CANCELLED'].includes(detail.value.status));
-const canRetryFailed = computed(() => (detail.value?.summary?.failed ?? 0) > 0);
+const canStart = computed(() => !!detail.value
+  && isMyBatch(detail.value)
+  && ['DRAFT', 'READY', 'PAUSED', 'CANCELLED'].includes(detail.value.status)
+  && !activeConflictFor(detail.value));
+const canPause = computed(() => !!detail.value && isMyBatch(detail.value) && detail.value.status === 'RUNNING');
+const canResume = computed(() => !!detail.value && isMyBatch(detail.value) && detail.value?.status === 'PAUSED'
+  && !activeConflictFor(detail.value));
+const canCancel = computed(() => !!detail.value && isMyBatch(detail.value)
+  && !['COMPLETED', 'COMPLETED_WITH_ERRORS', 'CANCELLED'].includes(detail.value.status));
+const canRetryFailed = computed(() => !!detail.value && isMyBatch(detail.value)
+  && (detail.value?.summary?.failed ?? 0) > 0);
 
 /** 任务状态筛选选项 */
 const TASK_FILTER_OPTIONS = [
@@ -371,6 +509,11 @@ onMounted(async () => {
       sources.value = r.items.map((s) => ({ id: s.id, label: s.label }));
     })
     .catch(() => undefined);
+  // 加载分类树：快照里 category_id 是原始 ID，需要树缓存把它翻译成一级分类名
+  await Promise.all([
+    sendMsg('echotik.getCategories', undefined).then((r) => { categories.value = r.items; }).catch(() => undefined),
+    sendMsg('ranking.getCategories', { source: 'FASTMOSS' }).then((r) => { fastMossCategories.value = r.items; }).catch(() => undefined),
+  ]);
   await loadAdminClients();
   await loadBatches();
   activeBatchRefreshTimer = setInterval(() => void refreshActiveBatches(), 3_000);
@@ -394,13 +537,16 @@ watch(isAdmin, async () => {
 
 <template>
   <div>
-    <div v-if="errorText" class="alert-bar err">{{ errorText }}</div>
+    <div v-if="errorText" class="alert-bar err" style="display:flex;align-items:center;gap:12px">
+      <span>{{ errorText }}</span>
+      <button v-if="conflictBatchId" class="act danger" :disabled="acting" @click="stopConflictAndRetryStart()">立即停止冲突批次</button>
+    </div>
     <div v-if="feedback" class="alert-bar" style="background:#f0fdf4;border-color:#bbf7d0;color:#166534">{{ feedback }}</div>
 
     <!-- ============ 批次列表层 ============ -->
     <template v-if="!detail">
       <div v-if="isAdmin" class="alert-bar" style="background:#eff6ff;border-color:#bfdbfe;color:#1e40af">
-        超级管理员只读视图：展示所有账号的抓取批次（不可控制执行）。
+        管理员视图：展示所有账号的抓取批次，可跨客户端控制（开始/暂停/停止/失败重试/重新抓取）。
       </div>
       <div class="card">
         <div class="form-row">
@@ -446,7 +592,7 @@ watch(isAdmin, async () => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="b in visibleBatches" :key="b.batch_id">
+            <tr v-for="b in visibleBatches" :key="b.batch_id" :class="{ 'row-other': !isMyBatch(b) }">
               <td>
                 <div class="mono">{{ b.batch_id.slice(0, 8) }}</div>
                 <div class="small"><span class="badge info">{{ sourceLabel(b.source_platform ?? b.snapshot?.source_platform) }}</span></div>
@@ -456,6 +602,8 @@ watch(isAdmin, async () => {
               <td v-if="isAdmin" class="small">
                 {{ clientLabel(b.client_id) }}
                 <div class="muted mono">{{ b.client_id?.slice(0, 8) ?? '—' }}</div>
+                <span v-if="isMyBatch(b)" class="badge ok">我的</span>
+                <span v-else class="badge info">他人</span>
               </td>
               <td class="small">{{ formatTime(b.created_at) }}</td>
               <td class="small">{{ batchProgress(b).done }}/{{ batchProgress(b).total || '—' }}</td>
@@ -468,6 +616,26 @@ watch(isAdmin, async () => {
               <td>
                 <button class="link" @click="openDetail(b)">详情</button>
                 <button class="link" @click="viewBatchProducts(b)">商品</button>
+                <template v-if="isMyBatch(b)">
+                  <template v-if="['DRAFT', 'READY', 'PAUSED', 'CANCELLED'].includes(b.status)">
+                    <button class="link" :disabled="acting || !!activeConflictFor(b)"
+                      :title="activeConflictFor(b) ? '请先停止其他活跃批次' : ''"
+                      @click="batchActionFor(b, 'start')">开始</button>
+                  </template>
+                  <template v-if="b.status === 'RUNNING'">
+                    <button class="link" :disabled="acting" @click="batchActionFor(b, 'pause')">暂停</button>
+                    <button class="link" :disabled="acting" @click="batchActionFor(b, 'cancel')">停止</button>
+                  </template>
+                  <template v-if="b.status === 'PAUSED'">
+                    <button class="link" :disabled="acting || !!activeConflictFor(b)"
+                      :title="activeConflictFor(b) ? '请先停止其他活跃批次' : ''"
+                      @click="batchActionFor(b, 'resume')">继续</button>
+                    <button class="link" :disabled="acting" @click="batchActionFor(b, 'cancel')">停止</button>
+                  </template>
+                  <template v-if="(b.summary?.failed ?? 0) > 0 && ['COMPLETED', 'COMPLETED_WITH_ERRORS'].includes(b.status)">
+                    <button class="link" :disabled="acting" @click="batchActionFor(b, 'retryFailed')">补采</button>
+                  </template>
+                </template>
               </td>
             </tr>
           </tbody>
@@ -491,7 +659,11 @@ watch(isAdmin, async () => {
           <span class="badge info">{{ sourceLabel(detail.source_platform ?? detail.snapshot?.source_platform) }}</span>
           <span :class="statusBadgeClass(detail.status)">{{ statusText(detail.status) }}</span>
           <span v-if="store.state?.active_batch_id === detail.batch_id" class="badge info">本客户端执行中</span>
-          <span v-if="isAdmin" class="badge info">管理员只读 · {{ clientLabel(detail.client_id) }}</span>
+          <span v-if="isAdmin" class="badge info">
+            管理员 · {{ clientLabel(detail.client_id) }}
+            <span v-if="isMyBatch(detail)" class="badge ok" style="margin-left:4px">我的</span>
+            <span v-else class="badge warn" style="margin-left:4px">他人（只读）</span>
+          </span>
         </h3>
         <div class="small muted">
           创建 {{ formatTime(detail.created_at) }} · 开始 {{ formatTime(detail.started_at) }} · 结束 {{ formatTime(detail.finished_at) }}
@@ -512,17 +684,15 @@ watch(isAdmin, async () => {
           失败 {{ batchSummaryCount(detail, 'failed') }} · 不确定 {{ batchSummaryCount(detail, 'unknown') }}
         </div>
         <div class="btn-row" style="flex-wrap: wrap">
-          <template v-if="!isAdmin">
-            <button class="primary" :disabled="!canStart || acting" @click="batchAction('start')">{{ detail.status === 'CANCELLED' ? '重新开始' : '开始' }}</button>
-            <button class="act" :disabled="!canPause || acting" @click="batchAction('pause')">暂停</button>
-            <button class="act" :disabled="!canResume || acting" @click="batchAction('resume')">继续</button>
-            <button class="act danger" :disabled="!canCancel || acting" @click="batchAction('cancel')">停止</button>
-            <button class="act" :disabled="!canRetryFailed || acting" @click="batchAction('retryFailed')">失败重试</button>
-          </template>
+          <button class="primary" :disabled="!canStart || acting" @click="batchAction('start')">{{ detail.status === 'CANCELLED' ? '重新开始' : '开始' }}</button>
+          <button class="act" :disabled="!canPause || acting" @click="batchAction('pause')">暂停</button>
+          <button class="act" :disabled="!canResume || acting" @click="batchAction('resume')">继续</button>
+          <button class="act danger" :disabled="!canCancel || acting" @click="batchAction('cancel')">停止</button>
+          <button class="act" :disabled="!canRetryFailed || acting" @click="batchAction('retryFailed')">失败重试</button>
           <button class="act" @click="viewBatchProducts(detail)">查看商品</button>
         </div>
         <div v-if="isAdmin" class="small muted" style="margin-top: 6px">
-          超级管理员只读视图：可查看任意客户端的批次与任务，不能开始/暂停/停止或重新抓取。
+          跨客户端控制：开始/暂停/停止/失败重试均会作用于该批次归属的客户端。
         </div>
         <!-- 运行前检查结果：不通过时显示具体错误与重新检测 -->
         <div v-if="precheckErrors.length" class="alert-bar err" style="margin-top: 8px">
@@ -559,7 +729,7 @@ watch(isAdmin, async () => {
                 <td>
                   <button class="link" @click="taskDrawer = t">详情</button>
                   <button
-                    v-if="!isAdmin && ['SKIPPED', 'FAILED'].includes(t.status)"
+                    v-if="['SKIPPED', 'FAILED'].includes(t.status)"
                     class="link"
                     :disabled="acting"
                     @click="recollectTask(t)"
@@ -612,7 +782,7 @@ watch(isAdmin, async () => {
         <div class="kv"><b>创建/更新</b><span>{{ formatTime(taskDrawer.created_at) }} / {{ formatTime(taskDrawer.updated_at) }}</span></div>
         <div class="btn-row" style="margin-top: 10px">
           <button
-            v-if="!isAdmin && ['SKIPPED', 'FAILED'].includes(taskDrawer.status)"
+            v-if="['SKIPPED', 'FAILED'].includes(taskDrawer.status)"
             class="primary"
             :disabled="acting"
             @click="recollectTask(taskDrawer)"

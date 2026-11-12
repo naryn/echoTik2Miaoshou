@@ -465,11 +465,13 @@ export function createMiaoshouAdapter(
    * @param panel 已弹出的面板
    * @param desc 采集入口按钮描述
    * @param delta 点击前后 DOM 变化描述
+   * @param feedbackTimeoutMs 二次确认后观察反馈的超时（来自执行参数）
    */
   async function handleOpenedPanel(
     panel: OpenedPanel,
     desc: string,
     delta: string,
+    feedbackTimeoutMs: number,
   ): Promise<{ submitted: boolean; evidence?: string; errorCode?: string }> {
     const buttons = collectPanelButtons(panel);
     const panelText = normalizeText(panel.text ?? '');
@@ -504,7 +506,7 @@ export function createMiaoshouAdapter(
       confirm.closest('button, a, [role="button"], [class*="btn"], [class*="button"]') ?? confirm;
     const cText = normalizeText(cTarget.textContent ?? '').slice(0, 16);
     await dlog('miaoshou', '面板内命中二次确认按钮，执行点击', { target: cText, cls: (cTarget.getAttribute('class') ?? '').slice(0, 50) });
-    const secondPromise = observeFeedback(10_000);
+    const secondPromise = observeFeedback(feedbackTimeoutMs);
     dispatchRealClick(cTarget);
     const second = await secondPromise;
     await dlog('miaoshou', '二次确认后反馈', { kind: second.kind, text: (second.text ?? '').slice(0, 60) });
@@ -529,13 +531,19 @@ export function createMiaoshouAdapter(
     /**
      * 检测妙手采集能力是否可用（含证据说明）
      * 妙手插件的内容脚本通常在页面加载完成后才注入按钮，因此这里轮询等待而非单次判定
+     * @param opts.timeoutMs 最长等待时间（来自执行参数 button_detect_timeout_sec）
      */
-    async detectAvailability() {
+    async detectAvailability(opts?: { timeoutMs?: number }) {
+      const timeoutMs = Math.max(500, opts?.timeoutMs ?? 30_000);
       const startedAt = Date.now();
-      await dlog('miaoshou', '开始检测采集按钮', { readyState: document.readyState, url: location.href.slice(0, 120) });
+      await dlog('miaoshou', '开始检测采集按钮', {
+        readyState: document.readyState,
+        timeoutMs,
+        url: location.href.slice(0, 120),
+      });
       let btn = findButton();
-      // 轮询等待插件注入（最长 30 秒，每 800ms 检查一次）
-      while (!btn && Date.now() - startedAt < 30_000) {
+      // 轮询等待插件注入（每 800ms 检查一次）
+      while (!btn && Date.now() - startedAt < timeoutMs) {
         await new Promise((r) => setTimeout(r, 800));
         btn = findButton();
       }
@@ -555,7 +563,7 @@ export function createMiaoshouAdapter(
       await dlog('miaoshou', '未命中采集按钮', { hint, structure: collectStructureHints() });
       return {
         available: false,
-        evidence: `等待 30s 未命中任何候选探针：${hint}；${collectStructureHints()} (选择器版本 ${config.version})`,
+        evidence: `等待 ${Math.round(timeoutMs / 1000)}s 未命中任何候选探针：${hint}；${collectStructureHints()} (选择器版本 ${config.version})`,
         reason: 'MIAOSHOU_BUTTON_NOT_FOUND',
       };
     },
@@ -574,12 +582,16 @@ export function createMiaoshouAdapter(
      * 使用完整指针事件序列（pointerdown/mousedown/mouseup/click）而不是裸 .click()，
      * 因为多数插件用 pointer/mouse 事件做守卫，裸 click 可能被静默忽略；
      * 若首个目标无响应，会按"由内到外"依次尝试祖先候选（事件处理器常挂在父容器上）
+     * @param opts.findButtonTimeoutMs 点击前等待按钮出现的最长时间（button_detect_timeout_sec）
+     * @param opts.feedbackTimeoutMs 点击后观察反馈的最长时间（submit_result_wait_sec）
      */
-    async submitCollectAction() {
+    async submitCollectAction(opts?: { findButtonTimeoutMs?: number; feedbackTimeoutMs?: number }) {
+      const findButtonTimeoutMs = Math.max(500, opts?.findButtonTimeoutMs ?? 10_000);
+      const feedbackTimeoutMs = Math.max(500, opts?.feedbackTimeoutMs ?? 8_000);
       const startedAt = Date.now();
       let btn = findButton();
       // 提交前再等一次（适配页面刚渲染完成、按钮稍后出现的场景）
-      while (!btn && Date.now() - startedAt < 10_000) {
+      while (!btn && Date.now() - startedAt < findButtonTimeoutMs) {
         await new Promise((r) => setTimeout(r, 400));
         btn = findButton();
       }
@@ -597,6 +609,8 @@ export function createMiaoshouAdapter(
       const hostsBefore = snapshotShadowHosts();
       let lastDelta = '';
       let lastDesc = '';
+      // 提交结果等待是“整次提交”的总预算，避免每个祖先候选都重新等一轮导致耗时翻倍
+      const submitDeadline = Date.now() + feedbackTimeoutMs;
       // 逐个候选尝试：任一候选让妙手节点增长即视为插件已响应
       for (const target of candidates) {
         const desc = `${target.tagName.toLowerCase()}.${(target.getAttribute('class') ?? '').slice(0, 50)} text="${normalizeText(target.textContent ?? '').slice(0, 16)}"`;
@@ -611,7 +625,9 @@ export function createMiaoshouAdapter(
           shadows: before.shadows,
           miaoshouNodes: before.miaoshou,
         });
-        const feedbackPromise = observeFeedback(8_000);
+        // 每次尝试至少给 1.5s 观察窗口，但不超过整体预算
+        const budget = Math.max(1_500, submitDeadline - Date.now());
+        const feedbackPromise = observeFeedback(Math.min(feedbackTimeoutMs, budget));
         dispatchRealClick(target);
         const fb = await feedbackPromise;
         const after = {
@@ -625,7 +641,7 @@ export function createMiaoshouAdapter(
           return { submitted: true, evidence: `已点击 ${desc}；提交后出现成功反馈: ${fb.text?.slice(0, 120)}` };
         }
         if (fb.kind === 'PANEL_OPENED' && fb.panel) {
-          return handleOpenedPanel(fb.panel, desc, delta);
+          return handleOpenedPanel(fb.panel, desc, delta, Math.max(1_500, submitDeadline - Date.now()));
         }
         if (fb.kind === 'FAILURE_TOAST') {
           return { submitted: false, evidence: `已点击 ${desc}；失败反馈: ${fb.text?.slice(0, 120)}`, errorCode: 'MIAOSHOU_FEEDBACK_FAILURE' };
@@ -634,7 +650,9 @@ export function createMiaoshouAdapter(
         // 不能用整页节点增长判断，TikTok 的 cookie 横幅等无关变化会造成误判
         if (after.miaoshou > before.miaoshou) {
           const late = findOpenedPanel(config.panelSelectors, hostsBefore);
-          if (late) return handleOpenedPanel(late, desc, delta);
+          if (late) {
+            return handleOpenedPanel(late, desc, delta, Math.max(1_500, submitDeadline - Date.now()));
+          }
           return {
             submitted: true,
             evidence: `已点击 ${desc}；未出现 toast，但妙手节点增长（${delta}），判定插件已响应`,
@@ -642,6 +660,8 @@ export function createMiaoshouAdapter(
         }
         lastDelta = delta;
         lastDesc = desc;
+        // 预算耗尽：不再尝试外层候选，直接按“无响应”收尾
+        if (Date.now() >= submitDeadline) break;
       }
       // 所有候选都无响应：多为插件校验 isTrusted（合成事件不被接受）
       return {

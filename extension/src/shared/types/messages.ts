@@ -255,7 +255,7 @@ export interface MessageMap {
   'auth.setToken': { req: { token: string }; res: AuthMe };
   /** 清除 auth token（退出授权） */
   'auth.clear': { req: void; res: { ok: boolean } };
-  // ---- 管理员（auth_users.role=ADMIN，只读） ----
+  // ---- 管理员跨账号查询（auth_users.role=ADMIN，admin.* 消息走 /v1/admin/* 只读查询；写操作复用普通 batch.* 消息，admin 自动放行跨客户端控制）----
   /** 管理员：全量客户端列表 */
   'admin.listClients': { req: void; res: AdminClientList };
   /** 管理员：全量采集批次列表 */
@@ -310,11 +310,11 @@ export interface MessageMap {
     };
   };
   'tiktok.detectMiaoshou': {
-    req: void;
+    req: { timeoutMs?: number } | void;
     res: { available: boolean; evidence: string; reason?: string };
   };
   'tiktok.submitCollect': {
-    req: void;
+    req: { findButtonTimeoutMs?: number; feedbackTimeoutMs?: number } | void;
     res: { submitted: boolean; evidence?: string; errorCode?: string };
   };
   'tiktok.verifyCollect': {

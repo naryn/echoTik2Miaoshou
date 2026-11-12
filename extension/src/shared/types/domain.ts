@@ -214,10 +214,10 @@ export interface ExecConfig {
   max_retries: number;
 }
 
-/** 默认执行参数（规范示例：15–30 秒低频） */
+/** 默认执行参数：2-4s 快轮（SUBMITTED 强制停留 4-6s 取 max） */
 export const DEFAULT_EXEC_CONFIG: ExecConfig = {
-  interval_min_sec: 15,
-  interval_max_sec: 30,
+  interval_min_sec: 2,
+  interval_max_sec: 4,
   batch_max: 200,
   page_wait_timeout_sec: 30,
   button_detect_timeout_sec: 15,
@@ -283,9 +283,18 @@ export interface IRankingAdapter {
 
 /** 妙手适配器合约（规范 §5.2），实现见 modules/miaoshou/adapter.ts */
 export interface IMiaoshouAdapter {
-  detectAvailability(): Promise<{ available: boolean; evidence: string; reason?: string }>;
+  /** 检测采集按钮是否注入；timeoutMs 由执行参数 button_detect_timeout_sec 传入 */
+  detectAvailability(opts?: {
+    timeoutMs?: number;
+  }): Promise<{ available: boolean; evidence: string; reason?: string }>;
   findCollectAction(): Promise<{ supported: boolean; reason?: string }>;
-  submitCollectAction(): Promise<{ submitted: boolean; evidence?: string; errorCode?: string }>;
+  /** 触发采集；超时由执行参数 submit_result_wait_sec / button_detect_timeout_sec 传入 */
+  submitCollectAction(opts?: {
+    /** 点击前等待按钮出现的最长时间 */
+    findButtonTimeoutMs?: number;
+    /** 点击后观察 toast/面板反馈的最长时间 */
+    feedbackTimeoutMs?: number;
+  }): Promise<{ submitted: boolean; evidence?: string; errorCode?: string }>;
   verifyCollection(
     productId: string,
   ): Promise<{ state: 'CONFIRMED' | 'NOT_CONFIRMED' | 'UNKNOWN'; evidence?: string }>;

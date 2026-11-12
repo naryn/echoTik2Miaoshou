@@ -59,18 +59,8 @@ def create_batch(
     if existing is not None:
         return existing, False, None
 
-    if not force:
-        active = db.execute(
-            select(CollectionBatch).where(
-                CollectionBatch.client_id == client_id,
-                CollectionBatch.status.in_(BATCH_ACTIVE_STATUSES),
-            )
-        ).scalars().first()
-        if active is not None:
-            raise conflict(
-                "BATCH_ALREADY_ACTIVE",
-                f"客户端已存在进行中的批次 {active.batch_id}，请先完成/取消或使用 force",
-            )
+    # 活跃批次互斥只在 control_batch(start/resume) 和 retry_failed 里做；
+    # create_batch 只是往 DB 插一条 DRAFT/READY 记录，不该被拦。
 
     # 汇总候选商品：优先显式 product_ids，否则取快照全部明细（按排名升序）
     candidates: list[str] = []
@@ -346,10 +336,14 @@ def retry_failed(
     )
 
 
-def recollect_task(db: Session, client_id: str, task_id: str) -> CollectionTask:
+def recollect_task(db: Session, client_id: str, task_id: str, *, skip_owner_check: bool = False) -> CollectionTask:
     """单条“重新抓取”：把已跳过/失败/不确定的任务重置为 PENDING 并强制跳过去重。
 
     若所属批次已结束，会重新置为 RUNNING，便于客户端立即领取该任务。
+
+    Args:
+        skip_owner_check: 管理员跨客户端操作时传 True，跳过批次归属校验；
+            同时批次 client_id 会被改写为当前调用者，确保执行落在正确客户端。
     """
     task = db.get(CollectionTask, task_id)
     if task is None:
@@ -357,16 +351,20 @@ def recollect_task(db: Session, client_id: str, task_id: str) -> CollectionTask:
     batch = db.get(CollectionBatch, task.batch_id)
     if batch is None:
         raise not_found("批次")
-    if batch.client_id != client_id:
+    if not skip_owner_check and batch.client_id != client_id:
         from app.services.errors import forbidden
 
         raise forbidden("任务不属于当前客户端")
     if task.status not in {"SKIPPED", "FAILED", "UNKNOWN"}:
         raise conflict("INVALID_STATE", f"任务状态 {task.status} 不允许重新抓取")
+    # 管理员跨客户端认领：批次归属转到当前调用者，活跃批次冲突检查随之切换到新作用域
+    if skip_owner_check:
+        batch.client_id = client_id
     if batch.status in BATCH_TERMINAL_STATUSES or batch.status == "PAUSED":
+        # 活跃批次检查以新归属作用域判断（batch.client_id 已在上方改写）
         active = db.execute(
             select(CollectionBatch).where(
-                CollectionBatch.client_id == client_id,
+                CollectionBatch.client_id == batch.client_id,
                 CollectionBatch.status.in_(BATCH_ACTIVE_STATUSES),
                 CollectionBatch.batch_id != batch.batch_id,
             )

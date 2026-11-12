@@ -44,11 +44,21 @@ export default defineContentScript({
             return probe(payload.expectedProductId);
           })(msg.payload as { expectedProductId: string }, null);
         case 'tiktok.detectMiaoshou':
-          await dlog('tiktok', '收到检测妙手请求', { url: location.href.slice(0, 100) });
-          return wrapHandler<'tiktok.detectMiaoshou'>(async () => miaoshou.detectAvailability())(undefined, null);
+          await dlog('tiktok', '收到检测妙手请求', {
+            url: location.href.slice(0, 100),
+            timeoutMs: (msg.payload as { timeoutMs?: number } | undefined)?.timeoutMs,
+          });
+          return wrapHandler<'tiktok.detectMiaoshou'>(async (payload) =>
+            miaoshou.detectAvailability({ timeoutMs: payload?.timeoutMs }),
+          )(msg.payload as { timeoutMs?: number } | undefined, null);
         case 'tiktok.submitCollect':
-          await dlog('tiktok', '收到提交采集请求');
-          return wrapHandler<'tiktok.submitCollect'>(async () => miaoshou.submitCollectAction())(undefined, null);
+          await dlog('tiktok', '收到提交采集请求', msg.payload);
+          return wrapHandler<'tiktok.submitCollect'>(async (payload) =>
+            miaoshou.submitCollectAction({
+              findButtonTimeoutMs: payload?.findButtonTimeoutMs,
+              feedbackTimeoutMs: payload?.feedbackTimeoutMs,
+            }),
+          )(msg.payload as { findButtonTimeoutMs?: number; feedbackTimeoutMs?: number } | undefined, null);
         case 'tiktok.verifyCollect':
           return wrapHandler<'tiktok.verifyCollect'>(async (payload) => {
             return miaoshou.verifyCollection(payload.productId);

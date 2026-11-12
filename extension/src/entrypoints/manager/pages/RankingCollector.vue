@@ -1121,5 +1121,56 @@ onUnmounted(() => {
       <div v-else class="empty">当前条件下无榜单数据。</div>
     </div>
 
+    <!-- 历史榜单子区：快照筛选 + 表格 + 从快照创建 ERP 批次 -->
+    <div class="card">
+      <h3>
+        历史榜单
+        <span class="muted small">共 {{ snapshotTotal }} 个快照，按最新采集时间倒序。</span>
+      </h3>
+      <div class="form-row">
+        <label>数据来源</label>
+        <select v-model="snapFilter.source_platform" @change="loadSnapshots">
+          <option value="">全部</option>
+          <option v-for="s in sourceTabs" :key="s.id" :value="s.id">{{ s.label }}</option>
+        </select>
+        <label style="width:auto">状态</label>
+        <select v-model="snapFilter.status" @change="loadSnapshots">
+          <option value="">全部</option>
+          <option value="COMPLETED">完成</option>
+          <option value="PARTIAL">部分完成</option>
+          <option value="FAILED">失败</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>采集日期</label>
+        <input v-model="snapFilter.date_from" type="date" @change="loadSnapshots" />
+        <span class="muted">至</span>
+        <input v-model="snapFilter.date_to" type="date" @change="loadSnapshots" />
+        <button class="act" :disabled="snapLoading" @click="loadSnapshots">{{ snapLoading ? '加载中…' : '刷新列表' }}</button>
+      </div>
+    </div>
+    <div v-if="snapLoading" class="muted small">加载中…</div>
+    <div v-else-if="!snapshots.length" class="empty">暂无历史快照。完成一次榜单采集后会自动出现在这里。</div>
+    <div v-else class="card" style="padding:8px">
+      <table class="list">
+        <thead><tr>
+          <th>快照</th><th>站点</th><th>榜单/周期</th><th>行数</th><th>采集时间</th><th>状态</th><th>操作</th>
+        </tr></thead>
+        <tbody><tr v-for="s in snapshots" :key="s.snapshot_id">
+          <td class="mono">{{ s.snapshot_id.slice(0, 8) }}<div class="small"><span class="badge info">{{ sourceLabel(s.source_platform) }}</span></div></td>
+          <td>{{ s.region ?? '—' }}</td>
+          <td class="small">{{ variantLabel(s.ranking_variant, s.source_platform) }}<template v-if="s.ranking_variant !== 'products'"> / {{ s.ranking_type ?? '—' }}</template><div class="muted">{{ s.period_start ?? '—' }}</div></td>
+          <td>{{ s.total_entries ?? '—' }}</td>
+          <td class="small">{{ formatTime(s.capture_started_at) }}</td>
+          <td><span :class="statusBadgeClass(s.status)">{{ statusText(s.status) }}</span></td>
+          <td>
+            <button class="link" @click="viewSnapshotProducts(s)">查看商品</button>
+            <button class="link" @click="recollect(s)">重新获取</button>
+            <button class="link" @click="createBatchFromSnapshot(s)">创建 ERP 批次</button>
+          </td>
+        </tr></tbody>
+      </table>
+    </div>
+
   </div>
 </template>

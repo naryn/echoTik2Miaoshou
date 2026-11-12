@@ -89,13 +89,22 @@ export async function ensureSingleTikTokTab(
   if (tabId == null) {
     const tab = await browser.tabs.create({ url: detailUrl, active: true, pinned: true });
     tabId = tab.id ?? null;
+    if (tabId == null) throw new Error('无法创建/定位 TikTok 工作 Tab');
+    await storageSet('worker_tab_id', tabId);
+    // 新建 Tab 不存在旧文档，直接等 complete 即可
+    await waitTabComplete(tabId, timeoutMs);
   } else {
+    await storageSet('worker_tab_id', tabId);
+    // 已经在目标页且加载完成：不再重复导航，否则 Chrome 不会触发 loading 事件，
+    // waitTabComplete 只能等满超时
+    const current = await browser.tabs.get(tabId).catch(() => null);
+    if (current?.status === 'complete' && current.url === detailUrl) return tabId;
+    // 必须先挂监听再导航：tabs.update 返回后立刻查询，往往还会读到上一页残留的
+    // complete 状态，导致后续 probe 在旧文档上执行（表现为“页面没就绪/商品不匹配”）
+    const navigated = waitTabComplete(tabId, timeoutMs, { requireNavigation: true });
     await browser.tabs.update(tabId, { url: detailUrl, active: true, pinned: true });
+    await navigated;
   }
-  if (tabId == null) throw new Error('无法创建/定位 TikTok 工作 Tab');
-
-  await storageSet('worker_tab_id', tabId);
-  await waitTabComplete(tabId, timeoutMs);
   return tabId;
 }
 
@@ -103,32 +112,48 @@ export async function ensureSingleTikTokTab(
  * 等待 Tab 加载到 complete 状态
  * @param tabId Tab ID
  * @param timeoutMs 超时
+ * @param opts.requireNavigation 为 true 时忽略“导航开始前”的残留 complete 状态，
+ *        必须观察到 loading→complete 才算加载完成（用于复用已有 Tab 的场景）
  */
-export function waitTabComplete(tabId: number, timeoutMs = 30_000): Promise<void> {
+export function waitTabComplete(
+  tabId: number,
+  timeoutMs = 30_000,
+  opts: { requireNavigation?: boolean } = {},
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    let sawLoading = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    /** 移除监听并清理定时器 */
+    const cleanup = () => {
+      if (timer != null) clearTimeout(timer);
       browser.tabs.onUpdated.removeListener(listener);
-      reject(new Error(`Tab ${tabId} 加载超时(${timeoutMs}ms)`));
-    }, timeoutMs);
+    };
     const listener = (
       updatedTabId: number,
       changeInfo: { status?: string },
     ) => {
-      if (updatedTabId === tabId && changeInfo.status === 'complete') {
-        clearTimeout(timer);
-        browser.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
+      if (updatedTabId !== tabId) return;
+      if (changeInfo.status === 'loading') sawLoading = true;
+      if (changeInfo.status !== 'complete') return;
+      // requireNavigation：导航尚未开始时读到的 complete 属于旧文档，必须忽略
+      if (opts.requireNavigation && !sawLoading) return;
+      cleanup();
+      resolve();
     };
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Tab ${tabId} 加载超时(${timeoutMs}ms)`));
+    }, timeoutMs);
     browser.tabs.onUpdated.addListener(listener);
-    // 若已 complete 则直接返回
-    void browser.tabs.get(tabId).then((tab) => {
-      if (tab.status === 'complete') {
-        clearTimeout(timer);
-        browser.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
-    });
+    if (!opts.requireNavigation) {
+      // 若已 complete 则直接返回（新建 Tab 场景）
+      void browser.tabs.get(tabId).then((tab) => {
+        if (tab.status === 'complete') {
+          cleanup();
+          resolve();
+        }
+      });
+    }
   });
 }
 

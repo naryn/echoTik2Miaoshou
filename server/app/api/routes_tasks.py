@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api import schemas
-from app.api.deps import Identity, ok, require_client, require_identity
+from app.api.deps import Identity, ok, require_admin_or_client, require_client, require_identity
 from app.db import get_db
 from app.models import CollectorClient
 from app.services import batch_service, lease_service
@@ -99,11 +99,16 @@ def submit_result(
 @router.post("/tasks/{task_id}/recollect")
 def recollect_task(
     task_id: str,
-    client: CollectorClient = Depends(require_client),
+    identity: Identity = Depends(require_admin_or_client),
     db: Session = Depends(get_db),
 ):
-    """单条重新抓取：重置任务并跳过“已采集”去重。"""
-    task = batch_service.recollect_task(db, client.client_id, task_id)
+    """单条重新抓取：重置任务并跳过“已采集”去重。管理员可跨客户端操作。"""
+    task = batch_service.recollect_task(
+        db,
+        client_id=identity.client.client_id,
+        task_id=task_id,
+        skip_owner_check=identity.role == "ADMIN",
+    )
     return ok(schemas.task_out(task))
 
 

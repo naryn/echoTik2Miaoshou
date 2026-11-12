@@ -94,7 +94,7 @@ def create_snapshot(
         period_end=body.period_end,
         filter_json=body.filter_json,
     )
-    data = schemas.snapshot_out(snapshot)
+    data = schemas.snapshot_out(snapshot, db)
     data["created"] = created
     return ok(data)
 
@@ -128,7 +128,7 @@ def finish_snapshot(
     snapshot = rank_service.get_snapshot_or_404(db, snapshot_id)
     _check_snapshot_owner(snapshot, client)
     snapshot = rank_service.finish_snapshot(db, snapshot, body.status)
-    return ok(schemas.snapshot_out(snapshot))
+    return ok(schemas.snapshot_out(snapshot, db))
 
 
 @router.get("/rank-snapshots")
@@ -163,7 +163,7 @@ def list_snapshots(
     )
     return ok(
         {
-            "items": [schemas.snapshot_out(s) for s in items],
+            "items": [schemas.snapshot_out(s, db) for s in items],
             "total": total,
             "page": page,
             "per_page": per_page,
@@ -249,6 +249,6 @@ def rank_history(
     return ok(
         {
             "product": schemas.product_out(product),
-            "items": [schemas.rank_entry_out(entry, snapshot) for entry, snapshot in rows],
+            "items": [schemas.rank_entry_out(entry, snapshot, db) for entry, snapshot in rows],
         }
     )

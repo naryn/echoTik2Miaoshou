@@ -67,7 +67,7 @@ def list_rank_snapshots(
     )
     return ok(
         {
-            "items": [schemas.snapshot_out(snapshot) for snapshot in items],
+            "items": [schemas.snapshot_out(snapshot, db) for snapshot in items],
             "total": total,
             "page": page,
             "per_page": size,

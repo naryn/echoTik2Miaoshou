@@ -4,9 +4,12 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from pydantic import AfterValidator, BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.config import ALLOWED_SOURCE_PLATFORMS, DEFAULT_SOURCE_PLATFORM
 from app.models import (
+    Category,
     CollectedImage,
     CollectionAttempt,
     CollectionBatch,
@@ -273,9 +276,58 @@ def product_out(p: Product) -> dict:
     }
 
 
-def snapshot_out(s: RankSnapshot) -> dict:
-    """序列化榜单快照。"""
-    return {
+def _resolve_top_category_name(db: Session, source: str, region: str, external_id: str | None) -> str | None:
+    """递归向上找一级分类名（level=1 或 parent_id 为空）。找不到返回 None。"""
+    if not external_id:
+        return None
+    current_external = external_id
+    while True:
+        node = db.execute(
+            select(Category).where(
+                Category.source == source.lower(),
+                Category.region == region,
+                Category.external_category_id == current_external,
+            )
+        ).scalar_one_or_none()
+        if node is None:
+            return None
+        if not node.parent_id or node.level == 1:
+            return node.name or node.external_category_id
+        current_external = node.parent_id
+
+
+def _category_name_from_filters(s: RankSnapshot) -> str | None:
+    """读取插件创建快照时写入 filter_json 的一级分类名称（旧版快照没有该字段）。"""
+    filters = s.filter_json or {}
+    label = filters.get("categoryLabel") or filters.get("category_label")
+    return label.strip() if isinstance(label, str) and label.strip() else None
+
+
+def _category_name_from_entries(db: Session, s: RankSnapshot) -> str | None:
+    """兜底：从快照内任一明细的 raw_excerpt.category 取一级分类名称。
+
+    榜单接口（热销/热推/新品）返回的 category 就是一级类目名，可直接展示；
+    商品库接口返回的是末级类目名，混进“一级分类”列会造成误导，故跳过。
+    """
+    if s.ranking_variant == "products":
+        return None
+    row = db.execute(
+        select(RankEntry.raw_excerpt)
+        .where(RankEntry.snapshot_id == s.snapshot_id, RankEntry.raw_excerpt.is_not(None))
+        .limit(1)
+    ).first()
+    if not row or not isinstance(row[0], dict):
+        return None
+    name = row[0].get("category")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    # FastMoss 的 category 是“一级 / 二级 / 三级”全路径，EchoTik 直接给一级类目名
+    return name.split("/")[0].strip() or None
+
+
+def snapshot_out(s: RankSnapshot, db: Session | None = None) -> dict:
+    """序列化榜单快照；传 db 时顺便把 category_name（一级分类名）一并解析出来。"""
+    data = {
         "snapshot_id": s.snapshot_id,
         "client_id": s.client_id,
         "source_platform": s.source_platform,
@@ -292,10 +344,19 @@ def snapshot_out(s: RankSnapshot) -> dict:
         "total_entries": s.total_entries,
         "request_id": s.request_id,
     }
+    if db is not None:
+        # 依次尝试：分类表 → 插件写入的筛选标签 → 快照明细里的一级类目名。
+        # categories 表当前不一定有数据（没有同步入口），后两级是实际生效的来源。
+        data["category_name"] = (
+            _resolve_top_category_name(db, s.source_platform, s.region, s.category_id)
+            or _category_name_from_filters(s)
+            or _category_name_from_entries(db, s)
+        )
+    return data
 
 
-def rank_entry_out(e: RankEntry, snapshot: RankSnapshot | None = None) -> dict:
-    """序列化榜单明细（可选携带快照信息）。"""
+def rank_entry_out(e: RankEntry, snapshot: RankSnapshot | None = None, db: Session | None = None) -> dict:
+    """序列化榜单明细（可选携带快照信息；传 db 时快照里会带 category_name）。"""
     data = {
         "id": e.id,
         "snapshot_id": e.snapshot_id,
@@ -307,7 +368,7 @@ def rank_entry_out(e: RankEntry, snapshot: RankSnapshot | None = None) -> dict:
         "observed_at": dt(e.observed_at),
     }
     if snapshot is not None:
-        data["snapshot"] = snapshot_out(snapshot)
+        data["snapshot"] = snapshot_out(snapshot, db)
     return data
 
 
@@ -315,8 +376,9 @@ def batch_out(
     b: CollectionBatch,
     summary: dict | None = None,
     snapshot: "RankSnapshot | None" = None,
+    db: Session | None = None,
 ) -> dict:
-    """序列化采集批次（可选携带聚合进度与来源榜单快照信息）。"""
+    """序列化采集批次（可选携带聚合进度与来源榜单快照信息；传 db 时快照里会带 category_name）。"""
     data = {
         "batch_id": b.batch_id,
         "client_id": b.client_id,
@@ -334,7 +396,7 @@ def batch_out(
     if summary is not None:
         data["summary"] = summary
     if snapshot is not None:
-        data["snapshot"] = snapshot_out(snapshot)
+        data["snapshot"] = snapshot_out(snapshot, db)
     return data
 
 
